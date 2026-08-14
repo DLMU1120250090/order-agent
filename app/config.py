@@ -35,10 +35,14 @@ class Settings(BaseSettings):
     TRAVEL_QWEATHER_CREDENTIAL_ID: str = ""
     # 携程浏览器自动化持久化登录目录
     TRAVEL_CTRIP_USER_DATA_DIR: str = ""
-    # 真实携程自动化开关：默认关闭；开启后优先尝试真实携程，被反爬/登录墙拦截时自动回退 Mock 收银台
-    TRAVEL_CTRIP_REAL_ENABLED: bool = False
+    # 真实携程自动化开关：默认开启；优先尝试真实携程，被反爬/登录墙拦截或页面未适配时自动回退 Mock 收银台
+    TRAVEL_CTRIP_REAL_ENABLED: bool = True
     # 携程国内机票频道入口
     TRAVEL_CTRIP_BASE_URL: str = "https://flights.ctrip.com/online/channel/domestic"
+    # 真实携程模式默认显式打开浏览器（非无头），模拟真人操作；无头模式实测被 whaleguard 拦截
+    TRAVEL_CTRIP_HEADLESS: bool = False
+    # 真实携程模式浏览器通道：优先本机 Chrome（实测可过鲸盾）；可选 chrome / msedge / chromium（内置）
+    TRAVEL_CTRIP_CHANNEL: str = "chrome"
     # 携程探测超时（秒）：加载页面后等待渲染，用于识别反爬/登录墙
     TRAVEL_CTRIP_PROBE_TIMEOUT: int = 20
     # 收银台二维码测试图片（相对项目根目录，如 qr_code.jpg；留空则自动生成占位二维码）

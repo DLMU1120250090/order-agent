@@ -11,6 +11,7 @@ os.environ["TRAVEL_MOCK_CHECKOUT_AUTO_PAY_SECONDS"] = "4"
 os.environ["TRAVEL_PAYMENT_POLL_SECONDS_FAST"] = "1"
 os.environ["TRAVEL_PAYMENT_POLL_SECONDS_SLOW"] = "1"
 os.environ["TRAVEL_PAYMENT_MONITOR_TIMEOUT"] = "60"
+os.environ["TRAVEL_CTRIP_REAL_ENABLED"] = "false"  # 端到端测试固定走 Mock 收银台，避免启动真实浏览器
 sys.path.insert(0, r"E:\tmp\diet-agent\order-agent")
 
 import uvicorn  # noqa: E402

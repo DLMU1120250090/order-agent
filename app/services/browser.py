@@ -60,9 +60,12 @@ class BrowserOrderService:
         self._sessions: Dict[str, dict] = {}
         self._user_data_dir = ""
 
-    def user_data_dir(self) -> str:
+    def user_data_dir(self, ctrip: bool = False) -> str:
         if not self._user_data_dir:
-            base = settings.TRAVEL_PLAYWRIGHT_USER_DATA_DIR.strip()
+            if ctrip:
+                base = (settings.TRAVEL_CTRIP_USER_DATA_DIR or settings.TRAVEL_PLAYWRIGHT_USER_DATA_DIR or "").strip()
+            else:
+                base = settings.TRAVEL_PLAYWRIGHT_USER_DATA_DIR.strip()
             if base:
                 self._user_data_dir = os.path.abspath(base)
             else:
@@ -91,7 +94,8 @@ class BrowserOrderService:
         """真实携程下单尝试（尽力而为）：
         1) 打开携程国内机票频道，探测登录态/反爬拦截（whaleguard、安全验证、passport 跳转）；
         2) 被拦截 → 抛 CtripUnavailable，由上层自动回退 Mock 收银台；
-        3) 若未来页面可访问，在此继续适配「搜索 → 选方案 → 收银台二维码」流程。
+        3) 未被拦截（真实 Chrome 实测可过鲸盾）→ 尽力推进「搜索」；
+        4) 搜索/选座/收银台任一环节未完成 → 同样回退 Mock（真实下单还需登录态与页面适配）。
         """
         from playwright.sync_api import sync_playwright
 
@@ -99,13 +103,26 @@ class BrowserOrderService:
         log.info("Playwright 尝试真实携程下单: %s order=%s", base, order.order_no)
         pw = sync_playwright().start()
         try:
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=self.user_data_dir(),
-                headless=settings.TRAVEL_PLAYWRIGHT_HEADLESS,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-                viewport={"width": 1440, "height": 900},
-                locale="zh-CN",
-            )
+            channel = settings.TRAVEL_CTRIP_CHANNEL.strip() or None
+            try:
+                context = pw.chromium.launch_persistent_context(
+                    user_data_dir=self.user_data_dir(ctrip=True),
+                    channel=channel,
+                    headless=settings.TRAVEL_CTRIP_HEADLESS,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                    viewport={"width": 1440, "height": 900},
+                    locale="zh-CN",
+                )
+            except Exception as e:  # noqa: BLE001
+                # 通道不可用（如本机无 Chrome）→ 回退内置 Chromium（大概率被 whaleguard 拦，随后自动回退 Mock）
+                log.warning("携程真实模式通道 %s 启动失败，回退内置 Chromium: %s", channel, e)
+                context = pw.chromium.launch_persistent_context(
+                    user_data_dir=self.user_data_dir(ctrip=True),
+                    headless=settings.TRAVEL_CTRIP_HEADLESS,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                    viewport={"width": 1440, "height": 900},
+                    locale="zh-CN",
+                )
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(base, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(settings.TRAVEL_CTRIP_PROBE_TIMEOUT * 1000)
@@ -122,13 +139,85 @@ class BrowserOrderService:
             ):
                 raise CtripUnavailable("携程反爬/登录拦截（whaleguard），无法自动下单")
 
-            # ② 未拦截但未进入收银台：当前未适配真实 DOM，回退 Mock（后续在此扩展）
-            raise CtripUnavailable("真实携程页面未进入收银台（DOM 未适配）")
+            # ② 未被拦截：尽力推进搜索（真实 DOM 随版本变化，失败即回退 Mock）
+            legs = (order.legs or {}).get("legs", [])
+            origin = legs[0].get("from_city") if legs else ""
+            destination = legs[-1].get("to_city") if legs else ""
+            if not (origin and destination):
+                raise CtripUnavailable("订单缺少出发/到达城市，无法真实搜索")
+            searched = self._try_ctrip_search(page, origin, destination)
+            if not searched:
+                raise CtripUnavailable("携程搜索表单未适配（DOM 变化），回退 Mock")
+
+            # ③ 已进入搜索结果：选座/收银台仍需登录态与页面适配，交由 Mock 完成支付演示
+            raise CtripUnavailable("已进入携程搜索结果页，选座/收银台待适配，回退 Mock 完成支付演示")
         finally:
             try:
                 pw.stop()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _try_ctrip_search(self, page, origin: str, destination: str) -> bool:
+        """尽力在携程搜索页填写 出发地/目的地 并点击搜索（候选选择器随版本维护）。
+        任一步失败返回 False，由上层回退 Mock。
+        """
+        try:
+            # 1) 关闭可能的营销弹层
+            for sel in (".mt_tips_close", "[class*='close']:visible", ".pop-close", ".dialog-close"):
+                try:
+                    el = page.locator(sel).first
+                    if el.count() and el.is_visible():
+                        el.click(timeout=2000)
+                        page.wait_for_timeout(500)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # 2) 城市输入（自定义城市选择器：点击城市框 → 输入城市名 → 选首个候选项）
+            if not self._fill_ctrip_city(page, origin):
+                log.warning("携程出发地填写失败")
+                return False
+            if not self._fill_ctrip_city(page, destination):
+                log.warning("携程目的地填写失败")
+                return False
+
+            # 3) 点击搜索
+            btn = page.locator(".search-btn").first
+            if not (btn.count() and btn.is_visible()):
+                log.warning("携程搜索按钮未找到")
+                return False
+            btn.click(timeout=5000)
+            page.wait_for_timeout(8000)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("携程搜索推进异常: %s", e)
+            return False
+
+    def _fill_ctrip_city(self, page, city: str) -> bool:
+        """点击城市输入框 → 输入城市名 → 选择首个候选；选择器失败则返回 False。"""
+        for box_sel in (
+            "input[placeholder*='出发']",
+            "input[placeholder*='到达']",
+            "input[placeholder*='目的地']",
+            "input[placeholder*='城市']",
+            "[class*='city'] input:visible",
+            "[class*='search'] input:visible",
+        ):
+            try:
+                box = page.locator(box_sel).first
+                if not (box.count() and box.is_visible()):
+                    continue
+                box.click(timeout=3000)
+                page.wait_for_timeout(600)
+                box.fill(city)
+                page.wait_for_timeout(1200)
+                for opt_sel in (".city-result li:visible", "[class*='city'] li:visible", ".search-list li:visible"):
+                    opt = page.locator(opt_sel).first
+                    if opt.count() and opt.is_visible():
+                        opt.click(timeout=3000)
+                        return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
 
     def _place_sync(self, order: TravelOrderRow) -> str:
         from playwright.sync_api import sync_playwright
