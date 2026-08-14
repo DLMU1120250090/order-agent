@@ -1,6 +1,9 @@
-"""Playwright 下单自动化（Mock 收银台）。
+"""Playwright 下单自动化（Mock 收银台 + 真实携程尝试）。
 真实模式：持久化登录态（launch_persistent_context）操作携程；
-当前演示：导航到本服务自带的 Mock 收银台页面，模拟确认订单并截图二维码元素，
+  开启 TRAVEL_CTRIP_REAL_ENABLED 后，先探测携程页面：被 whaleguard 反爬/
+  登录墙拦截（当前实测即为 whaleguard block）→ 自动回退 Mock 收银台；
+  若未来页面可访问，可在 _place_ctrip_sync 中继续适配 搜索→选方案→收银台 流程。
+当前演示（默认）：导航到本服务自带的 Mock 收银台页面，模拟确认订单并截图二维码元素，
 页面自动/手动模拟支付后，第 1 层页面变化检测通过 #pay-success 元素判定支付成功。
 
 注意：Windows 下 uvicorn --reload 的工作进程可能使用 Selector 事件循环，
@@ -21,6 +24,10 @@ from app.config import settings
 from app.models.database import TravelOrderRow
 
 log = logging.getLogger("travel.browser")
+
+
+class CtripUnavailable(RuntimeError):
+    """真实携程自动化不可用（反爬/登录墙/页面未适配）——由上层捕获并回退 Mock。"""
 
 
 class _BrowserThread:
@@ -65,9 +72,63 @@ class BrowserOrderService:
         return self._user_data_dir
 
     async def place_and_capture_qr(self, order: TravelOrderRow) -> str:
-        """打开 Mock 收银台 → 确认订单 → 等待二维码元素 → 截图保存，返回图片路径。"""
-        fut = self._thread.submit(lambda: self._place_sync(order))
+        """下单 + 二维码截图。
+        真实携程模式开启时优先尝试真实携程（登录/反爬拦截自动回退）；
+        否则直接走 Mock 收银台。
+        """
+        fut = self._thread.submit(lambda: self._place_auto(order))
         return await asyncio.wrap_future(fut)
+
+    def _place_auto(self, order: TravelOrderRow) -> str:
+        if settings.TRAVEL_CTRIP_REAL_ENABLED:
+            try:
+                return self._place_ctrip_sync(order)
+            except Exception as e:  # noqa: BLE001
+                log.warning("真实携程自动化不可用，自动回退 Mock 收银台: order=%s err=%s", order.order_no, e)
+        return self._place_sync(order)
+
+    def _place_ctrip_sync(self, order: TravelOrderRow) -> str:
+        """真实携程下单尝试（尽力而为）：
+        1) 打开携程国内机票频道，探测登录态/反爬拦截（whaleguard、安全验证、passport 跳转）；
+        2) 被拦截 → 抛 CtripUnavailable，由上层自动回退 Mock 收银台；
+        3) 若未来页面可访问，在此继续适配「搜索 → 选方案 → 收银台二维码」流程。
+        """
+        from playwright.sync_api import sync_playwright
+
+        base = settings.TRAVEL_CTRIP_BASE_URL.rstrip("/")
+        log.info("Playwright 尝试真实携程下单: %s order=%s", base, order.order_no)
+        pw = sync_playwright().start()
+        try:
+            context = pw.chromium.launch_persistent_context(
+                user_data_dir=self.user_data_dir(),
+                headless=settings.TRAVEL_PLAYWRIGHT_HEADLESS,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                viewport={"width": 1440, "height": 900},
+                locale="zh-CN",
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(base, timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(settings.TRAVEL_CTRIP_PROBE_TIMEOUT * 1000)
+
+            # ① 登录态 / 反爬拦截探测（实测 whaleguard 直接拦截无头访问）
+            url = page.url.lower()
+            body = ""
+            try:
+                body = (page.inner_text("body") or "")[:3000].lower()
+            except Exception:  # noqa: BLE001
+                pass
+            if any(k in url for k in ("passport.ctrip.com", "/login")) or any(
+                k in body for k in ("whaleguard", "安全验证", "滑动验证", "验证码", "请登录", "立即登录")
+            ):
+                raise CtripUnavailable("携程反爬/登录拦截（whaleguard），无法自动下单")
+
+            # ② 未拦截但未进入收银台：当前未适配真实 DOM，回退 Mock（后续在此扩展）
+            raise CtripUnavailable("真实携程页面未进入收银台（DOM 未适配）")
+        finally:
+            try:
+                pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _place_sync(self, order: TravelOrderRow) -> str:
         from playwright.sync_api import sync_playwright

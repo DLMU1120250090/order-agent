@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     TRAVEL_QWEATHER_CREDENTIAL_ID: str = ""
     # 携程浏览器自动化持久化登录目录
     TRAVEL_CTRIP_USER_DATA_DIR: str = ""
+    # 真实携程自动化开关：默认关闭；开启后优先尝试真实携程，被反爬/登录墙拦截时自动回退 Mock 收银台
+    TRAVEL_CTRIP_REAL_ENABLED: bool = False
+    # 携程国内机票频道入口
+    TRAVEL_CTRIP_BASE_URL: str = "https://flights.ctrip.com/online/channel/domestic"
+    # 携程探测超时（秒）：加载页面后等待渲染，用于识别反爬/登录墙
+    TRAVEL_CTRIP_PROBE_TIMEOUT: int = 20
     # 收银台二维码测试图片（相对项目根目录，如 qr_code.jpg；留空则自动生成占位二维码）
     TRAVEL_QR_TEST_IMAGE: str = ""
     # 微信桥开关（非官方协议，默认关闭）
@@ -78,8 +84,9 @@ class Settings(BaseSettings):
     # Mock 收银台地址（演示环境指向本服务自身）
     TRAVEL_MOCK_CHECKOUT_BASE_URL: str = "http://127.0.0.1:8090"
     TRAVEL_MOCK_CHECKOUT_AUTO_PAY_SECONDS: int = 8  # Mock 页面自动模拟支付秒数（演示三层检测用）
-    TRAVEL_PAYMENT_POLL_SECONDS: float = 3.0  # 第2层：订单状态轮询间隔
-    TRAVEL_PAYMENT_MONITOR_TIMEOUT: int = 180  # 三层支付检测总超时（秒）
+    TRAVEL_PAYMENT_POLL_SECONDS_FAST: float = 30.0  # 第2层：前 2 分钟轮询间隔（30s）
+    TRAVEL_PAYMENT_POLL_SECONDS_SLOW: float = 90.0  # 第2层：2 分钟后的轮询间隔（1~2 分钟）
+    TRAVEL_PAYMENT_MONITOR_TIMEOUT: int = 900  # 三层支付检测总超时（秒，15 分钟）
 
     def qweather_private_key(self) -> str:
         """解码和风天气 JWT 私钥 PEM"""

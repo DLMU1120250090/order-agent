@@ -1,4 +1,5 @@
-"""微信 Mock 桥：HTTP Webhook 模拟微信消息入站，出站消息记录到 outbox 供测试查看。
+"""微信 Mock 桥：HTTP Webhook 模拟微信消息入站，出站消息持久化到
+memory/wechat_outbox.jsonl（内存 outbox + 文件双写）供测试查看。
 真实 Wechaty 桥接入后，把这里的消息来源替换为 Wechaty 事件回调即可。
 """
 

@@ -54,13 +54,14 @@ class ItineraryPlanner:
         raw_legs: List[List[dict]] = [[f] for f in flights] + [[t] for t in trains]
         raw_legs += await self._transfers(db, origin, destination, trip_date)
 
-        ref_price = self._budget_reference(slots)
+        # 当日报价分布（全部候选方案总价），用于预算档位 P30/P70 动态映射
+        candidate_totals = [round(sum(float(leg["price"]) for leg in raw), 2) for raw in raw_legs]
+        ref_price = self._budget_reference(slots, candidate_totals)
         preferred_modes = self._preferred_modes(slots)
         early_bird = bool(profile and profile.preferences and profile.preferences.get("early_bird"))
 
         options: List[PlanOption] = []
-        for raw in raw_legs:
-            total = round(sum(float(leg["price"]) for leg in raw), 2)
+        for raw, total in zip(raw_legs, candidate_totals):
             if ref_price and total > ref_price * 1.5:
                 continue  # 硬过滤：预算超 1.5×
 
@@ -178,13 +179,27 @@ class ItineraryPlanner:
                         return combos
         return combos
 
-    def _budget_reference(self, slots: TravelSlotBundle) -> Optional[float]:
+    def _budget_reference(self, slots: TravelSlotBundle, prices: Optional[List[float]] = None) -> Optional[float]:
         if not slots.budget:
             return None
         label = slots.budget[0]
         tier = {"经济型": BudgetTier.economy, "舒适型": BudgetTier.comfort, "高端型": BudgetTier.premium}.get(label)
         if not tier:
             return None
+        # 动态映射（B2 定稿）：经济型 ≤ 当日 P30、舒适型 ≤ P70、高端型 = 当日最高价；
+        # 无报价时回退静态参考价（.env TRAVEL_BUDGET_REFERENCE）
+        if prices:
+            sorted_prices = sorted(float(p) for p in prices)
+            if sorted_prices:
+                def percentile(q: float) -> float:
+                    idx = round(q * (len(sorted_prices) - 1))
+                    return sorted_prices[idx]
+
+                if tier is BudgetTier.economy:
+                    return percentile(0.30)
+                if tier is BudgetTier.comfort:
+                    return percentile(0.70)
+                return sorted_prices[-1]
         return settings.budget_tiers().get(tier.value)
 
     def _preferred_modes(self, slots: TravelSlotBundle) -> set:

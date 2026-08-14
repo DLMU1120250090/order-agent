@@ -51,7 +51,9 @@ class BookingService:
     ) -> TravelOrderRow:
         profile = await profile_crud.get_profile(db, user_id)
         if not passengers:
-            passengers = (profile.passengers if profile and profile.passengers else []) or [{"name": "演示乘客", "id_type": "身份证", "id_no": "110101199001011234"}]
+            passengers = (profile.passengers if profile and profile.passengers else []) or [
+                {"name": "演示乘客", "id_type": "身份证", "id_no": "110101199001011234", "id_expiry": "2035-12-31"}
+            ]
 
         trip_date = (plan.legs[0].depart if plan.legs else datetime.now().strftime("%Y-%m-%d"))
         idem_key = self._idempotency_key(user_id, plan.plan_id, trip_date, passengers)

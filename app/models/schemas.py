@@ -243,7 +243,7 @@ class UserProfile(BaseModel):
     """L1 用户画像（C2 定稿）"""
     user_id: int
     home_city: Optional[str] = None
-    passengers: List[dict] = Field(default_factory=list)  # [{name, id_type, id_no}]
+    passengers: List[dict] = Field(default_factory=list)  # [{name, id_type, id_no, id_expiry}]
     budget_level: Optional[str] = None  # economy / comfort / premium
     preferences: dict = Field(default_factory=dict)  # cost_vs_time/tolerate_change/preferred_transport/seat_pref/early_bird
 

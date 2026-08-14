@@ -8,7 +8,8 @@ import sys
 
 os.environ["TRAVEL_MOCK_CHECKOUT_BASE_URL"] = "http://127.0.0.1:8096"
 os.environ["TRAVEL_MOCK_CHECKOUT_AUTO_PAY_SECONDS"] = "4"
-os.environ["TRAVEL_PAYMENT_POLL_SECONDS"] = "1"
+os.environ["TRAVEL_PAYMENT_POLL_SECONDS_FAST"] = "1"
+os.environ["TRAVEL_PAYMENT_POLL_SECONDS_SLOW"] = "1"
 os.environ["TRAVEL_PAYMENT_MONITOR_TIMEOUT"] = "60"
 sys.path.insert(0, r"E:\tmp\diet-agent\order-agent")
 

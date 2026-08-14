@@ -441,7 +441,8 @@ class TravelOrchestratorService:
 
         from app.config import settings as _settings
 
-        deadline = _time.time() + _settings.TRAVEL_PAYMENT_MONITOR_TIMEOUT
+        start = _time.time()
+        deadline = start + _settings.TRAVEL_PAYMENT_MONITOR_TIMEOUT
         while _time.time() < deadline:
             try:
                 async with async_session_maker() as db:
@@ -464,7 +465,14 @@ class TravelOrchestratorService:
                         return
             except Exception as e:  # noqa: BLE001
                 log.warning("支付监控异常 order=%s: %s", order.order_no, e)
-            await asyncio.sleep(_settings.TRAVEL_PAYMENT_POLL_SECONDS)
+            # 自适应轮询：前 2 分钟每 30 秒，之后每 90 秒（1~2 分钟），总超时 15 分钟
+            elapsed = _time.time() - start
+            interval = (
+                _settings.TRAVEL_PAYMENT_POLL_SECONDS_FAST
+                if elapsed < 120
+                else _settings.TRAVEL_PAYMENT_POLL_SECONDS_SLOW
+            )
+            await asyncio.sleep(interval)
         await browser_order.close(order.order_no)
         log.info("三层支付检测超时，保持 WAITING_USER（用户仍可回复“付好了”确认）: order=%s", order.order_no)
 

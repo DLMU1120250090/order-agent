@@ -76,9 +76,9 @@ class ReminderService:
             db, origin, destination, depart_hour=8, commute_minutes=60, weather=weather
         )
         checklist_md = await self.checklist.generate(db, legs, destination, weather)
-        # L1 证件检查：临近/不覆盖出发日期则提醒
+        # L1 证件检查：有效期需覆盖出行日期，临近 30 天提醒
         profile = await self.memory.get_profile(db, order.user_id)
-        id_check = "证件信息未录入，请确保携带有效身份证件。" if not (profile and profile.passengers) else "证件有效期检查通过。"
+        id_check = self._id_check(order, profile)
 
         text = (
             f"✈️ 出行准备包（{destination}）\n"
@@ -92,6 +92,35 @@ class ReminderService:
             OutboundMessage(kind="TEXT", channel=order.channel, text=text, correlation_id=task_id),
         )
         await self.task_service.succeed(db, task_id, result={"order_no": order.order_no, "type": "advisory"}, notify=False)
+
+    @staticmethod
+    def _id_check(order: TravelOrderRow, profile) -> str:
+        """L1 证件检查：证件有效期需覆盖出行日期，临近 30 天提醒。
+        与 _departing_within 一致：Mock 出发时间 = 订单更新时间 + 24h。
+        """
+        depart_date = (order.updated_at + timedelta(hours=24)).date()
+        passengers = profile.passengers if profile and profile.passengers else []
+        if not passengers:
+            return "证件信息未录入，请确保携带有效身份证件。"
+        msgs = []
+        for p in passengers:
+            name = str(p.get("name") or "乘客")
+            expiry = str(p.get("id_expiry") or p.get("expiry") or "").strip()
+            if not expiry:
+                msgs.append(f"{name}：证件有效期未录入，请确保证件在有效期内")
+                continue
+            try:
+                exp = datetime.strptime(expiry, "%Y-%m-%d").date()
+            except ValueError:
+                msgs.append(f"{name}：证件有效期格式异常（{expiry}），请人工核对")
+                continue
+            if exp < depart_date:
+                msgs.append(f"{name}：证件 {expiry} 到期，不覆盖出行日期，请及时更换")
+            elif (exp - depart_date).days <= 30:
+                msgs.append(f"{name}：证件 {expiry} 到期，临近出行请留意")
+            else:
+                msgs.append(f"{name}：证件有效期检查通过")
+        return "；".join(msgs)
 
     async def _reminded(self, db: AsyncSession, order_id: int) -> bool:
         res = await db.execute(
