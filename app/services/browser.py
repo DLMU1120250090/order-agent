@@ -158,7 +158,7 @@ class BrowserOrderService:
                 pass
 
     def _try_ctrip_search(self, page, origin: str, destination: str) -> bool:
-        """尽力在携程搜索页填写 出发地/目的地 并点击搜索（候选选择器随版本维护）。
+        """尽力在携程搜索页推进：单程 → 出发地/目的地 → 关闭城市选择器 → 点击搜索。
         任一步失败返回 False，由上层回退 Mock。
         """
         try:
@@ -172,52 +172,183 @@ class BrowserOrderService:
                 except Exception:  # noqa: BLE001
                     pass
 
-            # 2) 城市输入（自定义城市选择器：点击城市框 → 输入城市名 → 选首个候选项）
-            if not self._fill_ctrip_city(page, origin):
+            # 1.5) 切到「单程」（页面默认「往返」）
+            try:
+                one_way = page.locator(".form-select-radio-group li").first
+                if one_way.count() and one_way.is_visible():
+                    one_way.click(timeout=3000)
+                    page.wait_for_timeout(600)
+            except Exception:  # noqa: BLE001
+                pass
+
+            # 2) 城市输入：出发地 .flt-depart / 目的地 .flt-arrival（自定义城市选择器）
+            if not self._fill_ctrip_city(page, origin, "depart"):
                 log.warning("携程出发地填写失败")
                 return False
-            if not self._fill_ctrip_city(page, destination):
+            if not self._fill_ctrip_city(page, destination, "arrival"):
                 log.warning("携程目的地填写失败")
                 return False
+            self._close_city_picker(page)
 
-            # 3) 点击搜索
+            # 搜索前记录字段实际值，便于确认出发/到达是否填写正确
+            try:
+                dep_text = (page.locator(".flt-depart").first.inner_text() or "").strip()
+                arr_text = (page.locator(".flt-arrival").first.inner_text() or "").strip()
+                log.info("携程搜索前字段状态: 出发=%r 到达=%r", dep_text[:20], arr_text[:20])
+            except Exception:  # noqa: BLE001
+                pass
+
+            # 3) 点击搜索（若仍被城市选择器遮挡，force 点击兜底）
             btn = page.locator(".search-btn").first
             if not (btn.count() and btn.is_visible()):
                 log.warning("携程搜索按钮未找到")
                 return False
-            btn.click(timeout=5000)
+            try:
+                btn.click(timeout=5000)
+            except Exception as e:  # noqa: BLE001
+                log.warning("搜索按钮被遮挡，force 点击兜底: %s", e)
+                btn.click(force=True, timeout=5000)
             page.wait_for_timeout(8000)
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("携程搜索推进异常: %s", e)
             return False
 
-    def _fill_ctrip_city(self, page, city: str) -> bool:
-        """点击城市输入框 → 输入城市名 → 选择首个候选；选择器失败则返回 False。"""
-        for box_sel in (
-            "input[placeholder*='出发']",
-            "input[placeholder*='到达']",
-            "input[placeholder*='目的地']",
-            "input[placeholder*='城市']",
-            "[class*='city'] input:visible",
-            "[class*='search'] input:visible",
-        ):
+    def _fill_ctrip_city(self, page, city: str, field: str) -> bool:
+        """点击城市字段（depart/arrival）→ 输入城市名 → 文本匹配候选项/回车兜底。
+        填写后校验字段值，失败自动重试一次；返回是否成功。
+        """
+        field_sel = ".flt-depart" if field == "depart" else ".flt-arrival"
+        for attempt in range(2):
             try:
-                box = page.locator(box_sel).first
-                if not (box.count() and box.is_visible()):
-                    continue
-                box.click(timeout=3000)
-                page.wait_for_timeout(600)
+                self._close_city_picker(page)
+                field_el = page.locator(field_sel).first
+                if not (field_el.count() and field_el.is_visible()):
+                    return False
+                field_el.click(timeout=5000)
+                page.wait_for_timeout(800)
+
+                box = None
+                # 关键：城市面板同时存在 owDCity（出发地）与 owACity（目的地）两个输入框，
+                # 必须按字段取对应的输入框，否则永远填进出发地
+                box_sels = (
+                    ("input[name='owDCity'][placeholder*='城市']", "input[name='owDCity'][u_key='poi_input']")
+                    if field == "depart"
+                    else ("input[name='owACity'][placeholder*='城市']", "input[name='owACity'][u_key='poi_input']")
+                )
+                for sel in box_sels:
+                    loc = page.locator(sel).first
+                    if loc.count() and loc.is_visible():
+                        box = loc
+                        break
+                if box is None:
+                    log.warning(
+                        "携程城市面板输入框未找到 field=%s 面板结构=%s",
+                        field, self._picker_ancestors(page),
+                    )
+                    return False
                 box.fill(city)
-                page.wait_for_timeout(1200)
-                for opt_sel in (".city-result li:visible", "[class*='city'] li:visible", ".search-list li:visible"):
-                    opt = page.locator(opt_sel).first
-                    if opt.count() and opt.is_visible():
-                        opt.click(timeout=3000)
-                        return True
-            except Exception:  # noqa: BLE001
-                continue
+                page.wait_for_timeout(1500)
+
+                picked = self._pick_city_option(page, city)
+                if not picked:
+                    box.press("Enter")
+                    page.wait_for_timeout(800)
+                self._close_city_picker(page)
+
+                # 校验字段值是否真的生效：innerText + 字段内 input.value 双重判定
+                # （城市可能渲染在文本里，也可能只存在于 input.value，单一读取会误报失败）
+                try:
+                    shown = page.evaluate(
+                        """(sel) => {
+                            const el = document.querySelector(sel);
+                            if (!el) return "";
+                            const parts = [el.innerText || ""];
+                            const inp = el.querySelector("input");
+                            if (inp && inp.value) parts.push(inp.value);
+                            return parts.join("|");
+                        }""",
+                        field_sel,
+                    ) or ""
+                except Exception:  # noqa: BLE001
+                    shown = ""
+                if city in shown:
+                    return True
+                log.warning(
+                    "携程城市未生效 field=%s city=%s 当前字段=%r 第%d次重试",
+                    field, city, shown.strip()[:30], attempt + 2,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("携程城市填写异常 field=%s city=%s attempt=%d err=%s", field, city, attempt, e)
         return False
+
+    @staticmethod
+    def _picker_ancestors(page) -> str:
+        """诊断：城市面板输入框的祖先结构（填写失败时打日志，便于迭代选择器）。"""
+        try:
+            return page.evaluate(
+                """() => {
+                    const el = document.querySelector("input[u_key='poi_input']");
+                    if (!el) return "no-input";
+                    const out = [];
+                    let n = el.parentElement;
+                    for (let i = 0; n && i < 4; i++, n = n.parentElement) {
+                        out.push(n.className ? n.className.toString().slice(0, 80) : n.tagName);
+                    }
+                    return out.join(" > ");
+                }"""
+            )
+        except Exception:  # noqa: BLE001
+            return "?"
+
+    @staticmethod
+    def _pick_city_option(page, city: str) -> bool:
+        """点击文本匹配的城市候选项（携程候选项是文本节点，如「北京(所有机场)BJSBJ」）；
+        面板存在多份副本，只点击可见项。
+        """
+        try:
+            for pattern in (f"{city}(所有机场)", f"{city}首都国际机场", f"{city}站"):
+                locs = page.get_by_text(pattern, exact=False)
+                for i in range(min(locs.count(), 8)):
+                    item = locs.nth(i)
+                    try:
+                        if item.is_visible():
+                            item.click(timeout=2500)
+                            return True
+                    except Exception:  # noqa: BLE001
+                        continue
+            # 通用兜底：点击第一个「以城市名开头」的可见叶子节点
+            return bool(page.evaluate(
+                """(city) => {
+                    const els = document.querySelectorAll('div, li, span, p');
+                    for (const el of els) {
+                        if (el.offsetParent === null) continue;
+                        const t = (el.innerText || '').trim();
+                        if (t.startsWith(city) && t.length < 30 && !el.children.length) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                city,
+            ))
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _close_city_picker(page) -> None:
+        """关闭残留的城市选择器：Escape → 输入框失焦（不能点页面左上角，会命中携程 logo 跳页）。"""
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            page.evaluate("document.activeElement && document.activeElement.blur();")
+            page.wait_for_timeout(200)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _place_sync(self, order: TravelOrderRow) -> str:
         from playwright.sync_api import sync_playwright

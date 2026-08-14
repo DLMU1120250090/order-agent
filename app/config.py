@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     # 真实携程模式浏览器通道：优先本机 Chrome（实测可过鲸盾）；可选 chrome / msedge / chromium（内置）
     TRAVEL_CTRIP_CHANNEL: str = "chrome"
     # 携程探测超时（秒）：加载页面后等待渲染，用于识别反爬/登录墙
-    TRAVEL_CTRIP_PROBE_TIMEOUT: int = 20
+    TRAVEL_CTRIP_PROBE_TIMEOUT: int = 10
     # 收银台二维码测试图片（相对项目根目录，如 qr_code.jpg；留空则自动生成占位二维码）
     TRAVEL_QR_TEST_IMAGE: str = ""
     # 微信桥开关（非官方协议，默认关闭）
