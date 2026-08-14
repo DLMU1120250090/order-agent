@@ -1,0 +1,26 @@
+# 密钥与本地配置
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# 运行时产物（启动时自动创建）
+logs/
+memory/
+*.log
+
+# 本地历史与编辑器
+.history/
+.idea/
+.vscode/
+*.swp
+
+# 系统文件
+Thumbs.db
+.DS_Store

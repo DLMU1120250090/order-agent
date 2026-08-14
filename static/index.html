@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>出行规划与预订助手</title>
+    <link rel="stylesheet" href="./assets/css/app.css?v=7">
+</head>
+<body>
+<div class="app-shell">
+    <header class="topbar">
+        <a class="brand" href="#/travel" aria-label="回到出行助手首页">
+            <span class="brand-mark">行</span>
+            <span>
+                    <strong>出行规划与预订助手</strong>
+                    <small>规划 · 下单 · 改签 · 退票</small>
+                </span>
+        </a>
+        <nav class="nav-links" aria-label="主导航">
+            <a href="#/travel" data-nav="/travel">首页</a>
+            <a href="#/travel/chat" data-nav="/travel/chat">出行聊天</a>
+            <a href="#/travel/orders" data-nav="/travel/orders">我的订单</a>
+            <a href="#/travel/profile" data-nav="/travel/profile">用户画像</a>
+            <a href="#/admin/traces" data-nav="/admin/traces">Trace</a>
+            <a href="#/admin/evaluations" data-nav="/admin/evaluations">评估</a>
+        </nav>
+        <label class="user-field">
+            <span>用户 ID</span>
+            <input id="userIdInput" type="number" min="1" value="1">
+        </label>
+    </header>
+
+    <main id="app" class="page" tabindex="-1"></main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="./assets/js/api.js?v=7"></script>
+<script src="./assets/js/app.js?v=7"></script>
+</body>
+</html>
