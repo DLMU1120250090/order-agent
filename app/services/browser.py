@@ -30,34 +30,19 @@ class CtripUnavailable(RuntimeError):
     """真实携程自动化不可用（反爬/登录墙/页面未适配）——由上层捕获并回退 Mock。"""
 
 
-class _BrowserThread:
-    """专用浏览器线程：所有 Playwright 调用都在同一线程内串行执行（线程安全）。"""
-
-    def __init__(self):
-        self._jobs: "queue.Queue" = queue.Queue()
-        self._thread = threading.Thread(target=self._run, name="playwright-browser", daemon=True)
-        self._thread.start()
-
-    def _run(self):
-        while True:
-            fut, fn = self._jobs.get()
-            try:
-                fut.set_result(fn())
-            except Exception as e:  # noqa: BLE001
-                fut.set_exception(e)
-
-    def submit(self, fn: Callable[[], object]) -> concurrent.futures.Future:
-        fut: concurrent.futures.Future = concurrent.futures.Future()
-        self._jobs.put((fut, fn))
-        return fut
-
-
 class BrowserOrderService:
-    """Playwright 下单 + 收银台二维码截图 + 页面变化检测（sync API + 专用线程）。"""
+    """Playwright 下单 + 收银台二维码截图 + 页面变化检测（sync API + 每会话独立线程）。
+
+    注意：sync_playwright 会在所在线程创建并持有自己的事件循环，且会话存活期间该循环
+    一直处于「运行中」。若多个订单复用一个线程，第二次 sync_playwright 启动会报
+    "Sync API inside the asyncio loop"。因此每个下单任务使用独立线程，会话存活期间
+    由该线程持续服务（check_paid/close 命令循环），直到会话关闭。
+    """
 
     def __init__(self):
-        self._thread = _BrowserThread()
         self._sessions: Dict[str, dict] = {}
+        self._session_queues: Dict[str, "queue.Queue"] = {}
+        self._lock = threading.Lock()
         self._user_data_dir = ""
 
     def user_data_dir(self, ctrip: bool = False) -> str:
@@ -74,23 +59,74 @@ class BrowserOrderService:
             os.makedirs(self._user_data_dir, exist_ok=True)
         return self._user_data_dir
 
-    async def place_and_capture_qr(self, order: TravelOrderRow) -> str:
+    async def place_and_capture_qr(self, order: TravelOrderRow, trip_date: str = "") -> str:
         """下单 + 二维码截图。
         真实携程模式开启时优先尝试真实携程（登录/反爬拦截自动回退）；
-        否则直接走 Mock 收银台。
+        否则直接走 Mock 收银台。每个订单在独立线程执行（sync Playwright 循环隔离）。
+        trip_date 为真实携程搜索的出行日期（YYYY-MM-DD）。
         """
-        fut = self._thread.submit(lambda: self._place_auto(order))
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+
+        def job():
+            try:
+                path = self._place_auto(order, trip_date)
+                fut.set_result(path)
+            except Exception as e:  # noqa: BLE001
+                fut.set_exception(e)
+            # 下单成功且保留了会话（第1层页面变化检测）→ 本线程继续服务该会话直至 close
+            with self._lock:
+                q = self._session_queues.get(order.order_no)
+            if q is not None:
+                self._serve_session(order.order_no, q)
+
+        threading.Thread(target=job, name=f"playwright-{order.order_no}", daemon=True).start()
         return await asyncio.wrap_future(fut)
 
-    def _place_auto(self, order: TravelOrderRow) -> str:
+    def _serve_session(self, order_no: str, q: "queue.Queue") -> None:
+        """会话线程命令循环：check / close。"""
+        while True:
+            cmd, fut, fn = q.get()
+            try:
+                result = fn()
+                fut.set_result(result)
+            except Exception as e:  # noqa: BLE001
+                fut.set_exception(e)
+            if cmd == "close":
+                return
+
+    def _submit_session(self, order_no: str, cmd: str, fn) -> concurrent.futures.Future:
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            q = self._session_queues.get(order_no)
+        if q is None:
+            fut.set_exception(RuntimeError(f"会话不存在: {order_no}"))
+            return fut
+        q.put((cmd, fut, fn))
+        return fut
+
+    def _cleanup_session(self, order_no: str) -> None:
+        """关闭会话的浏览器上下文并停止 Playwright 驱动。"""
+        session = self._sessions.pop(order_no, None)
+        if session:
+            try:
+                session["context"].close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                session["pw"].stop()
+            except Exception:  # noqa: BLE001
+                pass
+            log.info("Playwright 会话已关闭: order_no=%s", order_no)
+
+    def _place_auto(self, order: TravelOrderRow, trip_date: str = "") -> str:
         if settings.TRAVEL_CTRIP_REAL_ENABLED:
             try:
-                return self._place_ctrip_sync(order)
+                return self._place_ctrip_sync(order, trip_date)
             except Exception as e:  # noqa: BLE001
                 log.warning("真实携程自动化不可用，自动回退 Mock 收银台: order=%s err=%s", order.order_no, e)
         return self._place_sync(order)
 
-    def _place_ctrip_sync(self, order: TravelOrderRow) -> str:
+    def _place_ctrip_sync(self, order: TravelOrderRow, trip_date: str = "") -> str:
         """真实携程下单尝试（尽力而为）：
         1) 打开携程国内机票频道，探测登录态/反爬拦截（whaleguard、安全验证、passport 跳转）；
         2) 被拦截 → 抛 CtripUnavailable，由上层自动回退 Mock 收银台；
@@ -145,7 +181,7 @@ class BrowserOrderService:
             destination = legs[-1].get("to_city") if legs else ""
             if not (origin and destination):
                 raise CtripUnavailable("订单缺少出发/到达城市，无法真实搜索")
-            searched = self._try_ctrip_search(page, origin, destination)
+            searched = self._try_ctrip_search(page, origin, destination, trip_date)
             if not searched:
                 raise CtripUnavailable("携程搜索表单未适配（DOM 变化），回退 Mock")
 
@@ -157,8 +193,8 @@ class BrowserOrderService:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _try_ctrip_search(self, page, origin: str, destination: str) -> bool:
-        """尽力在携程搜索页推进：单程 → 出发地/目的地 → 关闭城市选择器 → 点击搜索。
+    def _try_ctrip_search(self, page, origin: str, destination: str, trip_date: str = "") -> bool:
+        """尽力在携程搜索页推进：单程 → 出发地/目的地 → 出行日期 → 关闭城市选择器 → 点击搜索。
         任一步失败返回 False，由上层回退 Mock。
         """
         try:
@@ -190,15 +226,41 @@ class BrowserOrderService:
                 return False
             self._close_city_picker(page)
 
-            # 搜索前记录字段实际值，便于确认出发/到达是否填写正确
+            # 3) 设置出行日期（页面默认是明天，必须按行程日期选择）
+            if trip_date:
+                if not self._set_trip_date(page, trip_date):
+                    log.warning("携程日期设置失败: %s", trip_date)
+                    return False
+                self._close_city_picker(page)
+
+            # 搜索前记录字段实际值（innerText + input.value 双源），便于确认出发/到达/日期
             try:
-                dep_text = (page.locator(".flt-depart").first.inner_text() or "").strip()
-                arr_text = (page.locator(".flt-arrival").first.inner_text() or "").strip()
-                log.info("携程搜索前字段状态: 出发=%r 到达=%r", dep_text[:20], arr_text[:20])
+                dep_state = page.evaluate(
+                    """() => {
+                        const el = document.querySelector(".flt-depart");
+                        if (!el) return "";
+                        const p = [el.innerText || ""];
+                        const inp = el.querySelector("input");
+                        if (inp && inp.value) p.push(inp.value);
+                        return p.join("|").replace(/\\s+/g, " ").slice(0, 30);
+                    }"""
+                )
+                arr_state = page.evaluate(
+                    """() => {
+                        const el = document.querySelector(".flt-arrival");
+                        if (!el) return "";
+                        const p = [el.innerText || ""];
+                        const inp = el.querySelector("input");
+                        if (inp && inp.value) p.push(inp.value);
+                        return p.join("|").replace(/\\s+/g, " ").slice(0, 30);
+                    }"""
+                )
+                date_state = (page.locator("input[placeholder='yyyy-mm-dd']").first.input_value() or "")
+                log.info("携程搜索前字段状态: 出发=%r 到达=%r 日期=%r", dep_state, arr_state, date_state)
             except Exception:  # noqa: BLE001
                 pass
 
-            # 3) 点击搜索（若仍被城市选择器遮挡，force 点击兜底）
+            # 4) 点击搜索（若仍被城市选择器遮挡，force 点击兜底）
             btn = page.locator(".search-btn").first
             if not (btn.count() and btn.is_visible()):
                 log.warning("携程搜索按钮未找到")
@@ -212,6 +274,37 @@ class BrowserOrderService:
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("携程搜索推进异常: %s", e)
+            return False
+
+    @staticmethod
+    def _set_trip_date(page, trip_date: str) -> bool:
+        """点击日期显示区 → 日历面板 → 按 data-testid 精确点击目标日期（可跨月翻页）。"""
+        try:
+            year, month, day = (int(x) for x in trip_date.split("-"))
+        except Exception:  # noqa: BLE001
+            log.warning("携程日期格式错误: %s", trip_date)
+            return False
+        try:
+            date_field = page.locator(".modifyDate.depart-date").first
+            if not (date_field.count() and date_field.is_visible()):
+                return False
+            date_field.click(timeout=5000)
+            page.wait_for_timeout(1000)
+            target = f"date-day-{year:04d}-{month:02d}-{day:02d}"
+            for _ in range(13):  # 最多翻 13 个月
+                cell = page.locator(f"div.date-day[data-testid='{target}']").first
+                if cell.count():
+                    cell.click(timeout=5000)
+                    page.wait_for_timeout(600)
+                    return True
+                nxt = page.locator("span.in-date-picker.next-ico, span.next-ico").first
+                if not (nxt.count() and nxt.is_visible()):
+                    return False
+                nxt.click(timeout=3000)
+                page.wait_for_timeout(700)
+            return False
+        except Exception as e:  # noqa: BLE001
+            log.warning("携程日期选择异常: %s", e)
             return False
 
     def _fill_ctrip_city(self, page, city: str, field: str) -> bool:
@@ -393,16 +486,30 @@ class BrowserOrderService:
             raise
 
         # 保留会话供第 1 层页面变化检测（模拟支付后 #pay-success 出现）
+        # 同一订单重复下单（幂等复用）时，先关闭并清理旧会话
+        with self._lock:
+            old_q = self._session_queues.pop(order.order_no, None)
+        if old_q is not None:
+            old_fut: concurrent.futures.Future = concurrent.futures.Future()
+            old_q.put(("close", old_fut, lambda: self._cleanup_session(order.order_no)))
+            old_fut.result(timeout=15)
+        self._sessions.pop(order.order_no, None)
         self._sessions[order.order_no] = {"pw": pw, "context": context, "page": page}
+        with self._lock:
+            self._session_queues[order.order_no] = queue.Queue()
         return path
 
     async def check_paid(self, order_no: str) -> bool:
         """第 1 层：页面变化检测——Mock 收银台出现「支付成功」元素。"""
-        session = self._sessions.get(order_no)
+        with self._lock:
+            session = self._sessions.get(order_no)
         if session is None:
             return False
-        fut = self._thread.submit(lambda: self._check_paid_sync(session))
-        return bool(await asyncio.wrap_future(fut))
+        fut = self._submit_session(order_no, "check", lambda: self._check_paid_sync(session))
+        try:
+            return bool(await asyncio.wrap_future(fut))
+        except Exception:  # noqa: BLE001
+            return False
 
     @staticmethod
     def _check_paid_sync(session: dict) -> bool:
@@ -414,26 +521,16 @@ class BrowserOrderService:
             return False
 
     async def close(self, order_no: str):
-        session = self._sessions.pop(order_no, None)
-        if session is None:
+        with self._lock:
+            q = self._session_queues.pop(order_no, None)
+        if q is None:
             return
-        fut = self._thread.submit(lambda: self._close_sync(session, order_no))
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        q.put(("close", fut, lambda: self._cleanup_session(order_no)))
         await asyncio.wrap_future(fut)
 
-    @staticmethod
-    def _close_sync(session: dict, order_no: str):
-        try:
-            session["context"].close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            session["pw"].stop()
-        except Exception:  # noqa: BLE001
-            pass
-        log.info("Playwright 会话已关闭: order_no=%s", order_no)
-
     async def close_all(self):
-        for order_no in list(self._sessions):
+        for order_no in list(self._session_queues):
             await self.close(order_no)
 
 

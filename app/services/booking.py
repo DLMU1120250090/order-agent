@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.crud import order as order_crud
 from app.crud import profile as profile_crud
 from app.crud import task as task_crud
+from app.crud import trip as trip_crud
 from app.models.database import TravelOrderRow
 from app.models.enums import OrderStatus, OrderType, Supplier, PaymentPending
 from app.models.schemas import ChangeDecision, OrderDraftOut, OutboundMessage, PlanOption, TransportLeg
@@ -95,11 +96,18 @@ class BookingService:
 
         from app.config import settings as _settings
 
+        # 真实携程搜索需要行程日期（travel_trip.start_date），传给浏览器自动化
+        trip_date = ""
+        if order.trip_id:
+            trip = await trip_crud.get_trip(db, order.trip_id)
+            if trip and getattr(trip, "start_date", None):
+                trip_date = str(trip.start_date)
+
         qr_path = ""
         if _settings.TRAVEL_PLAYWRIGHT_ENABLED:
             try:
                 mock_supplier.register(order.order_no)
-                qr_path = await browser_order.place_and_capture_qr(order)
+                qr_path = await browser_order.place_and_capture_qr(order, trip_date=trip_date)
             except Exception as e:  # noqa: BLE001
                 log.warning("Playwright 下单失败，回退 Mock 二维码: order=%s err=%s", order.order_no, e)
         if not qr_path:
@@ -143,8 +151,21 @@ class BookingService:
                 test_img,
             )
             if os.path.exists(candidate):
-                log.info("使用测试二维码图片: %s", candidate)
-                return candidate
+                # 复制到 memory/qr 下，保证 /media 能正确托管（直接返回绝对路径会 404）
+                try:
+                    import shutil
+
+                    qr_dir = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "memory", "qr",
+                    )
+                    os.makedirs(qr_dir, exist_ok=True)
+                    target = os.path.join(qr_dir, f"qr_test_{order_no}.png")
+                    shutil.copyfile(candidate, target)
+                    log.info("使用测试二维码图片并复制到 media 目录: %s", target)
+                    return target
+                except Exception as e:  # noqa: BLE001
+                    log.warning("测试二维码图片复制失败，回退自动生成: %s", e)
             log.warning("测试二维码图片不存在，回退自动生成: %s", candidate)
         return await self.qr_capture.capture(order_no=order_no)
 
