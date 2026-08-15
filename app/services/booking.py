@@ -56,7 +56,14 @@ class BookingService:
                 {"name": "演示乘客", "id_type": "身份证", "id_no": "110101199001011234", "id_expiry": "2035-12-31"}
             ]
 
-        trip_date = (plan.legs[0].depart if plan.legs else datetime.now().strftime("%Y-%m-%d"))
+        # 幂等键使用真实出行日期（travel_trip.start_date），不能用「出发时刻」（HH:MM）
+        trip_date = ""
+        if trip_id:
+            trip = await trip_crud.get_trip(db, trip_id)
+            if trip and getattr(trip, "start_date", None):
+                trip_date = str(trip.start_date)
+        if not trip_date:
+            trip_date = (plan.legs[0].depart if plan.legs else datetime.now().strftime("%Y-%m-%d"))
         idem_key = self._idempotency_key(user_id, plan.plan_id, trip_date, passengers)
 
         existing = await order_crud.get_order_by_idempotency(db, idem_key)

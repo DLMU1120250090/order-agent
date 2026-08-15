@@ -59,6 +59,18 @@ async def save_plan(db: AsyncSession, trip_id: Optional[int], option: PlanOption
     return row.id
 
 
+async def set_plan_id(db: AsyncSession, plan_id: int) -> None:
+    """把落库后的 plan_id 回填进 plan_json（下单幂等键依赖 plan_id，防止不同方案撞车）。"""
+    res = await db.execute(select(TravelPlanRow).where(TravelPlanRow.id == plan_id))
+    row = res.scalars().first()
+    if row:
+        data = dict(row.plan_json or {})
+        data["plan_id"] = str(plan_id)
+        row.plan_json = data
+        db.add(row)
+        await db.commit()
+
+
 async def get_plan(db: AsyncSession, plan_id: int) -> Optional[TravelPlanRow]:
     res = await db.execute(select(TravelPlanRow).where(TravelPlanRow.id == plan_id))
     return res.scalars().first()
