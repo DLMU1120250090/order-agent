@@ -278,7 +278,11 @@ class BrowserOrderService:
 
     @staticmethod
     def _set_trip_date(page, trip_date: str) -> bool:
-        """点击日期显示区 → 日历面板 → 按 data-testid 精确点击目标日期（可跨月翻页）。"""
+        """点击日期显示区 → 日历面板 → 翻页直到目标日期可见 → 精确点击。
+        注意：携程会预渲染多份日历（单程/往返/多程），is_visible() 不可靠；
+        必须用「视口 + elementFromPoint 命中测试」确认日期格子真的可点，
+        否则会点到被覆盖的隐藏格子，导致日期不生效且日历残留遮挡搜索按钮。
+        """
         try:
             year, month, day = (int(x) for x in trip_date.split("-"))
         except Exception:  # noqa: BLE001
@@ -291,21 +295,75 @@ class BrowserOrderService:
             date_field.click(timeout=5000)
             page.wait_for_timeout(1000)
             target = f"date-day-{year:04d}-{month:02d}-{day:02d}"
+            date_input = page.locator("input[placeholder='yyyy-mm-dd']").first
             for _ in range(13):  # 最多翻 13 个月
-                cell = page.locator(f"div.date-day[data-testid='{target}']").first
-                if cell.count():
-                    cell.click(timeout=5000)
-                    page.wait_for_timeout(600)
-                    return True
-                nxt = page.locator("span.in-date-picker.next-ico, span.next-ico").first
-                if not (nxt.count() and nxt.is_visible()):
+                if BrowserOrderService._date_cell_hittable(page, target):
+                    cell = page.locator(f"div.date-day[data-testid='{target}']").first
+                    try:
+                        cell.click(timeout=5000)
+                        page.wait_for_timeout(600)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("携程日期格子点击失败: %s", e)
+                    # 校验日期是否真正生效（防止点到隐藏格子/错误坐标）
+                    try:
+                        val = date_input.input_value() or ""
+                    except Exception:  # noqa: BLE001
+                        val = ""
+                    if f"{year:04d}-{month:02d}-{day:02d}" in val:
+                        # 关闭可能残留的日历，避免遮挡搜索按钮
+                        try:
+                            page.keyboard.press("Escape")
+                            page.wait_for_timeout(300)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return True
+                    log.warning("携程日期点击后未生效: %s，继续翻页", trip_date)
+                pt = BrowserOrderService._next_click_point(page)
+                if not pt:
                     return False
-                nxt.click(timeout=3000)
-                page.wait_for_timeout(700)
+                page.mouse.click(pt[0], pt[1])
+                page.wait_for_timeout(800)
             return False
         except Exception as e:  # noqa: BLE001
             log.warning("携程日期选择异常: %s", e)
             return False
+
+    @staticmethod
+    def _date_cell_hittable(page, target: str) -> bool:
+        """目标日期格子是否真的可点击：在视口内、且中心点没有被其他元素遮挡。"""
+        return bool(page.evaluate(
+            """(target) => {
+                const el = document.querySelector("div.date-day[data-testid='" + target + "']");
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return false;
+                if (r.left < 0 || r.top < 0 || r.right > window.innerWidth || r.bottom > window.innerHeight) return false;
+                const x = r.left + r.width / 2, y = r.top + r.height / 2;
+                const top = document.elementFromPoint(x, y);
+                return top === el || (top && el.contains(top));
+            }""",
+            target,
+        ))
+
+    @staticmethod
+    def _next_click_point(page):
+        """找到真正可见的「下月」按钮中心点（多份日历副本中只有一份可见）。"""
+        return page.evaluate(
+            """() => {
+                const els = [...document.querySelectorAll("span.in-date-picker.next-ico, span.next-ico")];
+                for (const el of els) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0 && el.offsetParent !== null) {
+                        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+                        const top = document.elementFromPoint(x, y);
+                        if (top === el || (top && el.contains(top))) {
+                            return [Math.round(x), Math.round(y)];
+                        }
+                    }
+                }
+                return null;
+            }"""
+        )
 
     def _fill_ctrip_city(self, page, city: str, field: str) -> bool:
         """点击城市字段（depart/arrival）→ 输入城市名 → 文本匹配候选项/回车兜底。
