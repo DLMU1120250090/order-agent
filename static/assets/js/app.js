@@ -422,7 +422,7 @@
                 <article class="meal-card">
                     <header>
                         <div>
-                            <h3>方案 ${escapeHtml(block.planId)}</h3>
+                            <h3>方案 ${escapeHtml(block.planNo ?? block.planId)}</h3>
                             <p class="muted">总价 ¥${Number(block.totalPrice ?? 0).toFixed(0)} · 耗时 ${escapeHtml(block.totalDurationH ?? "-")}h</p>
                         </div>
                         ${block.score ? `<span class="score">评分 ${Number(block.score).toFixed(2)}</span>` : ""}

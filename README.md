@@ -41,7 +41,7 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
    uvicorn app.main:app --host 127.0.0.1 --port 8090
    ```
 
-   打开 <http://127.0.0.1:8090> 即可使用（默认 Mock 模式，无需外部数据密钥）。
+   打开 <http://127.0.0.1:8090> 即可使用。
 
 ## 目录结构
 

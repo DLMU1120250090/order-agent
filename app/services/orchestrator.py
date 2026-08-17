@@ -286,7 +286,7 @@ class TravelOrchestratorService:
             msg = OutboundMessage(channel=state.channel.value, text=reply)
             return self._finish(db, state, ctx, msg)
 
-        blocks = [self._plan_card(o) for o in decision.options]
+        blocks = [self._plan_card(o, plan_no=idx) for idx, o in enumerate(decision.options, 1)]
         top_plans = [{"planId": o.plan_id, "legs": [l.model_dump() for l in o.legs], "totalPrice": o.total_price, "totalDurationH": o.total_duration_h, "score": o.score} for o in decision.options]
         speech = await self._recommend_speech(db, state, ctx, agent_set, text, merged, top_plans, decision.reason)
 
@@ -811,8 +811,9 @@ class TravelOrchestratorService:
             return False
         return "行程" in t
 
-    def _plan_card(self, o: PlanOption) -> dict:
+    def _plan_card(self, o: PlanOption, plan_no: int = 0) -> dict:
         return {
+            "planNo": plan_no,
             "planId": o.plan_id,
             "legs": [l.model_dump() for l in o.legs],
             "totalPrice": o.total_price,
