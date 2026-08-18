@@ -73,8 +73,20 @@ class MemoryService:
             f.write(text)
         return text
 
+    def _read_l3(self) -> str:
+        """读取 L3 长期偏好蒸馏快照（memory/MEMORY.md），控制注入长度。"""
+        try:
+            md_path = os.path.join(self.memory_dir, "MEMORY.md")
+            if not os.path.exists(md_path):
+                return ""
+            with open(md_path, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+            return text[:600]
+        except Exception:  # noqa: BLE001
+            return ""
+
     async def build_context(self, db: AsyncSession, user_id: int) -> str:
-        """L1 画像 + 相关 L2 → 上下文串（注入规划/决策/下单预填）。"""
+        """L1 画像 + 相关 L2 摘要 + L3 长期偏好快照 → 上下文串（注入规划/推荐/决策）。"""
         profile = await self.get_profile(db, user_id)
         summaries = await self.recent_summaries(db, user_id, 5)
         parts = []
@@ -85,4 +97,7 @@ class MemoryService:
             )
         if summaries:
             parts.append("近期行程: " + " | ".join(s.replace("\n", " ")[:100] for s in summaries))
+        l3 = self._read_l3()
+        if l3:
+            parts.append("长期偏好(L3): " + l3.replace("\n", " ")[:400])
         return "\n".join(parts) if parts else "（暂无用户画像）"

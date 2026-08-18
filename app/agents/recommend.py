@@ -31,6 +31,7 @@ class PlanRecommendAgent:
             ("user", (
                 "用户原话：{user_input}\n"
                 "当前槽位：{slots}\n"
+                "用户长期记忆（参考，不要编造）：{memory_context}\n"
                 "候选方案：{top_plans}\n"
                 "请输出 JSON，包含 recommendations 数组（每项 planId + reason）和 speechText，不要编造候选之外的方案。"
             ))
@@ -41,12 +42,14 @@ class PlanRecommendAgent:
         self,
         user_input: str,
         slots: str,
-        top_plans: str
+        top_plans: str,
+        memory_context: str = "",
     ) -> PlanRecommendOutputSchema:
         return await self.chain.ainvoke({
             "user_input": user_input,
             "slots": slots,
-            "top_plans": top_plans
+            "top_plans": top_plans,
+            "memory_context": memory_context or "（暂无）",
         })
 
 
