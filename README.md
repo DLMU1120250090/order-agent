@@ -55,3 +55,4 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
 
 - 默认 `TRAVEL_MOCK_MODE=true`，外部数据 API 使用内置模拟数据；接入真实供应商时填写 `.env` 中对应密钥并关闭 Mock。
 - 真实 `.env` 不纳入版本控制，请勿提交。
+
