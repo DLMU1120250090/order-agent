@@ -59,10 +59,11 @@ class MemoryService:
         return [r.summary_md for r in res.scalars().all()]
 
     async def distill(self, db: AsyncSession, user_id: int) -> str:
-        """L3 偏好蒸馏：轻量模型读 L1 + 近 30 条 L2 → 提炼偏好结论；失败回退规则汇总。"""
+        """L3 偏好蒸馏：轻量模型读 L1 + 近 30 条 L2 + 历史偏好结论 → 提炼新结论；失败回退规则汇总。"""
         profile = await self.get_profile(db, user_id)
         summaries = await self.recent_summaries(db, user_id, 30)
-        conclusion = await self._llm_distill(user_id, profile, summaries)
+        previous = self._read_previous_conclusion()
+        conclusion = await self._llm_distill(user_id, profile, summaries, previous)
 
         lines = ["# 用户偏好蒸馏（L3）", ""]
         if conclusion:
@@ -89,8 +90,33 @@ class MemoryService:
             f.write(text)
         return text
 
-    async def _llm_distill(self, user_id: int, profile, summaries: List[str]) -> str:
-        """轻量模型提炼偏好结论；任何异常返回空串（由 distill 回退规则汇总）。"""
+    def _read_previous_conclusion(self) -> str:
+        """读取上一轮 L3 偏好结论（供新一轮蒸馏参考，保持长期连续性，不无限追加）。"""
+        try:
+            md_path = os.path.join(self.memory_dir, "MEMORY.md")
+            if not os.path.exists(md_path):
+                return ""
+            with open(md_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            start = None
+            for i, line in enumerate(lines):
+                if line.startswith("## 偏好结论"):
+                    start = i + 1
+                    break
+            if start is None:
+                return ""
+            parts = []
+            for line in lines[start:]:
+                if line.startswith("## "):
+                    break
+                if line.strip():
+                    parts.append(line.strip())
+            return "\n".join(parts)[:300]
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _llm_distill(self, user_id: int, profile, summaries: List[str], previous: str = "") -> str:
+        """轻量模型提炼偏好结论（参考历史结论，保留稳定、更新变化）；异常返回空串由 distill 兜底。"""
         try:
             profile_text = (
                 f"常驻城市={profile.home_city or '未知'}, 预算档位={profile.budget_level or '未知'}, "
@@ -99,12 +125,17 @@ class MemoryService:
                 else "（暂无画像）"
             )
             summaries_text = "\n".join(f"- {s[:150]}" for s in summaries) or "（暂无行程）"
+            history_text = previous or "（暂无历史结论）"
             prompt = ChatPromptTemplate.from_messages([
                 SystemMessage(content=load_prompt("distill.txt")),
-                ("user", "用户画像：{profile}\n近期行程摘要：{summaries}\n请输出偏好结论。"),
+                ("user", "用户画像：{profile}\n近期行程摘要：{summaries}\n历史偏好结论：{history}\n请输出偏好结论。"),
             ])
             chain = prompt | get_light_model()
-            res = await chain.ainvoke({"profile": profile_text, "summaries": summaries_text})
+            res = await chain.ainvoke({
+                "profile": profile_text,
+                "summaries": summaries_text,
+                "history": history_text,
+            })
             text = str(getattr(res, "content", "") or "").strip()
             return text[:400]
         except Exception as e:  # noqa: BLE001
