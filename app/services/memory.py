@@ -1,13 +1,20 @@
+import logging
 import os
 from datetime import date, datetime
 from typing import List, Optional
 
+from langchain_core.messages import SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompt_loader import load_prompt
+from app.config import get_light_model
 from app.crud import profile as profile_crud
 from app.models.database import TripSummaryRow
 from app.models.schemas import TripSummary, UserProfile
+
+log = logging.getLogger("travel.memory")
 
 
 class MemoryService:
@@ -52,26 +59,57 @@ class MemoryService:
         return [r.summary_md for r in res.scalars().all()]
 
     async def distill(self, db: AsyncSession, user_id: int) -> str:
-        """L3 偏好蒸馏：读 L1 + 最近 30 条 L2 → 更新 memory/MEMORY.md。"""
+        """L3 偏好蒸馏：轻量模型读 L1 + 近 30 条 L2 → 提炼偏好结论；失败回退规则汇总。"""
         profile = await self.get_profile(db, user_id)
         summaries = await self.recent_summaries(db, user_id, 30)
-        lines = [
-            "# 用户偏好蒸馏（L3）",
-            "",
+        conclusion = await self._llm_distill(user_id, profile, summaries)
+
+        lines = ["# 用户偏好蒸馏（L3）", ""]
+        if conclusion:
+            lines += ["## 偏好结论（LLM 蒸馏）", conclusion, ""]
+        else:
+            lines += ["## 偏好结论（规则汇总兜底）", "（本次蒸馏模型不可用，由规则汇总生成）", ""]
+        lines += [
+            "## 数据依据",
             f"- 用户ID: {user_id}",
-            f"- 常驻城市: {profile.home_city if profile and profile.home_city else '未知'}",
-            f"- 预算档位: {profile.budget_level if profile and profile.budget_level else '未知'}",
-            f"- 偏好: {profile.preferences if profile and profile.preferences else '{}'}",
-            f"- 常用乘客数: {len(profile.passengers) if profile and profile.passengers else 0}",
-            "",
-            "## 近期行程（最近 30 条）",
         ]
+        if profile:
+            lines += [
+                f"- 常驻城市: {profile.home_city or '未知'}",
+                f"- 预算档位: {profile.budget_level or '未知'}",
+                f"- 偏好: {profile.preferences or {}}",
+                f"- 常用乘客数: {len(profile.passengers or [])}",
+            ]
+        lines.append("")
+        lines.append("## 近期行程（最近 30 条）")
         lines.extend(f"- {s.replace(chr(10), ' ')[:180]}" for s in summaries)
         text = "\n".join(lines)
         md_path = os.path.join(self.memory_dir, "MEMORY.md")
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(text)
         return text
+
+    async def _llm_distill(self, user_id: int, profile, summaries: List[str]) -> str:
+        """轻量模型提炼偏好结论；任何异常返回空串（由 distill 回退规则汇总）。"""
+        try:
+            profile_text = (
+                f"常驻城市={profile.home_city or '未知'}, 预算档位={profile.budget_level or '未知'}, "
+                f"偏好={profile.preferences or {}}, 常用乘客数={len(profile.passengers or [])}"
+                if profile
+                else "（暂无画像）"
+            )
+            summaries_text = "\n".join(f"- {s[:150]}" for s in summaries) or "（暂无行程）"
+            prompt = ChatPromptTemplate.from_messages([
+                SystemMessage(content=load_prompt("distill.txt")),
+                ("user", "用户画像：{profile}\n近期行程摘要：{summaries}\n请输出偏好结论。"),
+            ])
+            chain = prompt | get_light_model()
+            res = await chain.ainvoke({"profile": profile_text, "summaries": summaries_text})
+            text = str(getattr(res, "content", "") or "").strip()
+            return text[:400]
+        except Exception as e:  # noqa: BLE001
+            log.warning("L3 LLM 蒸馏失败，回退规则汇总: %s", e)
+            return ""
 
     def _read_l3(self) -> str:
         """读取 L3 长期偏好蒸馏快照（memory/MEMORY.md），控制注入长度。"""
