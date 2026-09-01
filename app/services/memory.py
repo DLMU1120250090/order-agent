@@ -23,7 +23,7 @@ class MemoryService:
     - L0 会话上下文：复用 diet_sessions/diet_messages（编排层）
     - L1 用户画像：MySQL user_profile（规则确定性写入）
     - L2 行程摘要：表 + md 文件 memory/trips/（后台异步 LLM 生成）
-    - L3 偏好蒸馏：memory/MEMORY.md（每日定时 distill，简化 Dream）
+    - L3 偏好蒸馏：memory/distill/user_{id}.md（每日定时 distill，按用户隔离）
     """
 
     def __init__(self, memory_dir: str = ""):
@@ -32,6 +32,11 @@ class MemoryService:
             memory_dir = os.path.join(project_dir, "memory")
         self.memory_dir = memory_dir
         os.makedirs(os.path.join(self.memory_dir, "trips"), exist_ok=True)
+        os.makedirs(os.path.join(self.memory_dir, "distill"), exist_ok=True)
+
+    def _l3_path(self, user_id: int) -> str:
+        """L3 偏好蒸馏文件路径（按用户隔离，避免多用户互相覆盖/串读）。"""
+        return os.path.join(self.memory_dir, "distill", f"user_{user_id}.md")
 
     async def get_profile(self, db: AsyncSession, user_id: int) -> Optional[UserProfile]:
         return await profile_crud.get_profile(db, user_id)
@@ -62,7 +67,7 @@ class MemoryService:
         """L3 偏好蒸馏：轻量模型读 L1 + 近 30 条 L2 + 历史偏好结论 → 提炼新结论；失败回退规则汇总。"""
         profile = await self.get_profile(db, user_id)
         summaries = await self.recent_summaries(db, user_id, 30)
-        previous = self._read_previous_conclusion()
+        previous = self._read_previous_conclusion(user_id)
         conclusion = await self._llm_distill(user_id, profile, summaries, previous)
 
         lines = ["# 用户偏好蒸馏（L3）", ""]
@@ -85,15 +90,15 @@ class MemoryService:
         lines.append("## 近期行程（最近 30 条）")
         lines.extend(f"- {s.replace(chr(10), ' ')[:180]}" for s in summaries)
         text = "\n".join(lines)
-        md_path = os.path.join(self.memory_dir, "MEMORY.md")
+        md_path = self._l3_path(user_id)
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(text)
         return text
 
-    def _read_previous_conclusion(self) -> str:
-        """读取上一轮 L3 偏好结论（供新一轮蒸馏参考，保持长期连续性，不无限追加）。"""
+    def _read_previous_conclusion(self, user_id: int) -> str:
+        """读取该用户上一轮 L3 偏好结论（供新一轮蒸馏参考，保持长期连续性，不无限追加）。"""
         try:
-            md_path = os.path.join(self.memory_dir, "MEMORY.md")
+            md_path = self._l3_path(user_id)
             if not os.path.exists(md_path):
                 return ""
             with open(md_path, "r", encoding="utf-8") as f:
@@ -142,10 +147,10 @@ class MemoryService:
             log.warning("L3 LLM 蒸馏失败，回退规则汇总: %s", e)
             return ""
 
-    def _read_l3(self) -> str:
-        """读取 L3 长期偏好蒸馏快照（memory/MEMORY.md），控制注入长度。"""
+    def _read_l3(self, user_id: int) -> str:
+        """读取该用户 L3 长期偏好蒸馏快照（memory/distill/user_{id}.md），控制注入长度。"""
         try:
-            md_path = os.path.join(self.memory_dir, "MEMORY.md")
+            md_path = self._l3_path(user_id)
             if not os.path.exists(md_path):
                 return ""
             with open(md_path, "r", encoding="utf-8") as f:
@@ -166,7 +171,7 @@ class MemoryService:
             )
         if summaries:
             parts.append("近期行程: " + " | ".join(s.replace("\n", " ")[:100] for s in summaries))
-        l3 = self._read_l3()
+        l3 = self._read_l3(user_id)
         if l3:
             parts.append("长期偏好(L3): " + l3.replace("\n", " ")[:400])
         return "\n".join(parts) if parts else "（暂无用户画像）"
