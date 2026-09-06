@@ -40,6 +40,7 @@ from app.services.skill_loader import load_skill
 from app.services.task import TaskService
 from app.services.trace import TraceContext, TraceScope, active_trace_ctx, traced_agent_call
 from app.services.trace_schema import EventType
+from app.services.user_memory_events import UserEventType, record_user_event
 from app.database import async_session_maker
 
 log = logging.getLogger("travel.orchestrator")
@@ -360,6 +361,11 @@ class TravelOrchestratorService:
             rejected = state.selectedPlanId or (state.currentBatch[-1] if state.currentBatch else None)
             action = "DISLIKE" if any(k in text for k in ("太贵", "不好", "不喜欢", "不满意")) else "SWITCH"
             await self._record_feedback(db, state, action, plan_id=rejected, reason=f"用户调整方案: {text[:80]}", trace_id=ctx.trace_id)
+            await record_user_event(
+                db, user_id=user_id, event_type=UserEventType.RECOMMEND_REJECTED,
+                session_id=state.sessionId, trace_id=ctx.trace_id,
+                context={"planId": rejected, "action": action, "reason": text[:100]},
+            )
 
         merged = self._merge_slots(state.slots, revised.slots)
         merged, fuzzy = await self._resolve_dates(db, merged)
@@ -512,6 +518,11 @@ class TravelOrchestratorService:
 
         # 用户以消息方式选择方案 → 记录正向反馈（LIKE），供评估系统使用
         await self._record_feedback(db, state, "LIKE", plan_id=str(selected), reason=f"用户选择方案下单: {text[:80]}", trace_id=ctx.trace_id)
+        await record_user_event(
+            db, user_id=user_id, event_type=UserEventType.RECOMMEND_ACCEPTED,
+            session_id=state.sessionId, trace_id=ctx.trace_id,
+            context={"planId": str(selected), "reason": text[:100]},
+        )
 
         plan_row = await trip_crud.get_plan(db, int(selected))
         if not plan_row:
@@ -835,6 +846,11 @@ class TravelOrchestratorService:
         )
         asyncio.create_task(self.task_service.run(task_id, lambda db: self.booking.execute_change(db, task_id, order, decision)))
         ctx.record_event("BOOKING_STARTED", "CHANGE", {"orderNo": order.order_no}, {"taskId": task_id, "decision": decision.reason})
+        await record_user_event(
+            db, user_id=user_id, event_type=UserEventType.CHANGE_CONFIRMED,
+            session_id=state.sessionId, task_id=task_id, trace_id=ctx.trace_id, order_no=order.order_no,
+            context={"targetDate": target_date, "reason": decision.reason[:200]},
+        )
         msg = OutboundMessage(
             channel=state.channel.value,
             kind="TASK_PROGRESS",
@@ -877,6 +893,11 @@ class TravelOrchestratorService:
         )
         asyncio.create_task(self.task_service.run(task_id, lambda db: self.booking.execute_refund(db, task_id, order)))
         ctx.record_event("BOOKING_STARTED", "REFUND", {"orderNo": order.order_no}, {"taskId": task_id})
+        await record_user_event(
+            db, user_id=user_id, event_type=UserEventType.REFUND_CONFIRMED,
+            session_id=state.sessionId, task_id=task_id, trace_id=ctx.trace_id, order_no=order.order_no,
+            context={},
+        )
         msg = OutboundMessage(
             channel=state.channel.value,
             kind="TASK_PROGRESS",
@@ -891,6 +912,12 @@ class TravelOrchestratorService:
         turning_off = "关" in text or "停" in text or "不要" in text
         prefs["price_monitor"] = False if turning_off else True
         await self.memory.update_profile(db, user_id, preferences=prefs)
+        enabled = not turning_off
+        await record_user_event(
+            db, user_id=user_id, event_type=UserEventType.MONITOR_TOGGLED,
+            session_id=state.sessionId, trace_id=ctx.trace_id,
+            context={"enabled": enabled, "reason": text[:80]},
+        )
         status = "已关闭" if turning_off else "已开启（默认开启）"
         msg = OutboundMessage(channel=state.channel.value, text=f"价格监控{status}，降价超过阈值时我会推送方案。")
         ctx.record_event("PRICE_MONITOR_TOGGLED", "MONITOR", {"userId": user_id}, {"enabled": not turning_off})

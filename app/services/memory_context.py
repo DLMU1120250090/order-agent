@@ -16,6 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.crud import profile as profile_crud
 from app.models.database import TripSummaryRow
 from app.models.schemas import TravelSlotBundle, UserProfile
+from app.services.user_memory_events import (
+    UserEventType,
+    recent_user_events,
+    summarize_change_events,
+    summarize_price_events,
+)
 
 
 class SlotStatus(str, Enum):
@@ -213,7 +219,14 @@ class MemoryContextBuilder:
 
     async def build_for_monitoring(self, db: AsyncSession, user_id: int) -> dict:
         profile = await profile_crud.get_profile(db, user_id)
-        return monitor_context_from_profile(profile)
+        ctx = monitor_context_from_profile(profile)
+        price_rows = await recent_user_events(
+            db, user_id,
+            (UserEventType.PRICE_DROP_ACCEPTED, UserEventType.PRICE_DROP_IGNORED),
+            limit=100,
+        )
+        ctx["priceEventHistory"] = summarize_price_events(price_rows)
+        return ctx
 
     async def build_for_reminder(self, db: AsyncSession, user_id: int) -> dict:
         profile = await profile_crud.get_profile(db, user_id)
@@ -252,4 +265,10 @@ class MemoryContextBuilder:
 
         context = change_context_from_profile(profile, passengers)
         context["similarTrips"] = similar
+        change_rows = await recent_user_events(
+            db, user_id,
+            (UserEventType.CHANGE_CONFIRMED, UserEventType.CHANGE_REJECTED, UserEventType.REFUND_CONFIRMED),
+            limit=50,
+        )
+        context["changeHistory"] = summarize_change_events(change_rows)
         return context

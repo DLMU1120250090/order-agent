@@ -174,6 +174,22 @@ class UserProfileRow(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class UserMemoryEventRow(SQLModel, table=True):
+    """User L2 决策行为事件（分化方案 P1）：用户如何处理事情，而不是旅行本身。"""
+    __tablename__ = "memory_user_event"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    event_type: str = Field(max_length=64, index=True)
+    session_id: Optional[str] = Field(default=None, max_length=64)
+    task_id: Optional[str] = Field(default=None, max_length=64)
+    trace_id: Optional[str] = Field(default=None, max_length=128)
+    order_no: Optional[str] = Field(default=None, max_length=64)
+    context: Dict[str, Any] = Field(sa_column=Column(JSON, nullable=True))
+    result: Dict[str, Any] = Field(sa_column=Column(JSON, nullable=True))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class TripSummaryRow(SQLModel, table=True):
     """L2 行程摘要（表 + md 双写）"""
     __tablename__ = "trip_summary"
