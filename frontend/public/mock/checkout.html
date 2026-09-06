@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>携程旅行 Mock 收银台</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: "Microsoft YaHei", sans-serif; background: #f3f5f7; display: flex; justify-content: center; padding: 32px 12px; }
+        .checkout { width: 520px; background: #fff; border-radius: 14px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.08); }
+        .header { background: linear-gradient(135deg, #2b7ae8, #1f5fc4); color: #fff; padding: 18px 22px; }
+        .header h1 { font-size: 18px; }
+        .header p { font-size: 12px; opacity: .85; margin-top: 4px; }
+        .body { padding: 22px; }
+        .steps { display: flex; gap: 8px; margin-bottom: 18px; font-size: 12px; color: #888; }
+        .steps .step { flex: 1; text-align: center; padding: 8px 0; border-radius: 8px; background: #f6f8fa; }
+        .steps .step.active { background: #e8f1ff; color: #1f5fc4; font-weight: 600; }
+        .order-info { border: 1px dashed #d9e2ef; border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; font-size: 14px; line-height: 1.9; }
+        .order-info b { color: #e63; }
+        .qr-box { display: flex; align-items: center; gap: 16px; padding: 14px 16px; border: 1px solid #e5e9f0; border-radius: 10px; }
+        .qr-box canvas { border: 6px solid #fff; box-shadow: 0 0 0 1px #dfe5ee; border-radius: 6px; }
+        .qr-tip { font-size: 13px; color: #555; line-height: 1.8; }
+        .pay-success { display: none; margin-top: 16px; padding: 16px; border-radius: 10px; background: #eafaf1; color: #1c9d5c; font-size: 15px; font-weight: 600; text-align: center; }
+        .btn { display: inline-block; border: 0; border-radius: 8px; padding: 10px 22px; font-size: 14px; cursor: pointer; }
+        .btn-primary { background: #ff8f1f; color: #fff; }
+        .btn-ghost { background: #eef2f7; color: #444; }
+        .actions { margin-top: 16px; display: flex; gap: 10px; }
+        .hidden { display: none !important; }
+        .muted { color: #999; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="checkout">
+        <div class="header">
+            <h1>携程旅行 · Mock 收银台</h1>
+            <p>浏览器自动化演示页（Playwright 驱动，数据全部为模拟数据）</p>
+        </div>
+        <div class="body">
+            <div class="steps">
+                <div class="step" id="step-1">① 确认订单</div>
+                <div class="step" id="step-2">② 扫码支付</div>
+                <div class="step" id="step-3">③ 支付成功</div>
+            </div>
+
+            <div id="panel-confirm">
+                <div class="order-info">
+                    订单号：<b id="order-no">-</b><br>
+                    乘客：<span id="passenger">-</span><br>
+                    应付金额：<b id="price">-</b> 元
+                </div>
+                <div class="actions">
+                    <button class="btn btn-primary" id="btn-confirm">确认订单，前往收银台</button>
+                </div>
+            </div>
+
+            <div id="panel-pay" class="hidden">
+                <div class="qr-box">
+                    <canvas id="qr-code" width="128" height="128"></canvas>
+                    <div class="qr-tip">
+                        请使用本人手机扫码支付<br>
+                        （Agent 绝不代付）<br>
+                        <span class="muted" id="auto-pay-tip"></span>
+                    </div>
+                </div>
+                <div class="actions">
+                    <button class="btn btn-primary" id="btn-pay">模拟支付</button>
+                </div>
+                <div class="pay-success" id="pay-success">支付成功 ✅（页面变化检测第 1 层命中）</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            const qs = new URLSearchParams(location.search);
+            const orderNo = qs.get("order_no") || "ORD-DEMO";
+            const price = qs.get("price") || "0";
+            const passenger = qs.get("passenger") || "演示乘客";
+            const autoPay = Math.max(0, parseInt(qs.get("auto_pay") || "0", 10) || 0);
+
+            document.getElementById("order-no").textContent = orderNo;
+            document.getElementById("passenger").textContent = passenger;
+            document.getElementById("price").textContent = price;
+
+            // 由订单号确定性的伪二维码图案
+            function drawQr(canvas, seedText) {
+                const ctx = canvas.getContext("2d");
+                const n = 16, size = 128, cell = size / n;
+                let seed = 0;
+                for (let i = 0; i < seedText.length; i++) seed = (seed * 31 + seedText.charCodeAt(i)) >>> 0;
+                ctx.fillStyle = "#fff";
+                ctx.fillRect(0, 0, size, size);
+                ctx.fillStyle = "#111";
+                for (let y = 0; y < n; y++) {
+                    for (let x = 0; x < n; x++) {
+                        const v = ((x * 7 + y * 13 + seed) >>> 0) % 3;
+                        if (v === 0) ctx.fillRect(x * cell, y * cell, cell, cell);
+                    }
+                }
+                // 三个定位角
+                function finder(ox, oy) {
+                    ctx.fillStyle = "#111";
+                    ctx.fillRect(ox, oy, 3 * cell, 3 * cell);
+                    ctx.fillStyle = "#fff";
+                    ctx.fillRect(ox + cell, oy + cell, cell, cell);
+                }
+                finder(0, 0); finder((n - 3) * cell, 0); finder(0, (n - 3) * cell);
+            }
+
+            document.getElementById("btn-confirm").addEventListener("click", function () {
+                document.getElementById("step-1").classList.remove("active");
+                document.getElementById("step-2").classList.add("active");
+                document.getElementById("panel-confirm").classList.add("hidden");
+                document.getElementById("panel-pay").classList.remove("hidden");
+                drawQr(document.getElementById("qr-code"), orderNo);
+                if (autoPay > 0) {
+                    document.getElementById("auto-pay-tip").textContent =
+                        "演示：页面将在 " + autoPay + " 秒后自动模拟支付";
+                    setTimeout(finishPay, autoPay * 1000);
+                } else {
+                    document.getElementById("auto-pay-tip").textContent = "点击「模拟支付」完成支付";
+                }
+            });
+
+            document.getElementById("btn-pay").addEventListener("click", finishPay);
+
+            function finishPay() {
+                const paid = document.getElementById("pay-success");
+                if (paid.style.display === "block") return;
+                paid.style.display = "block";
+                document.getElementById("step-2").classList.remove("active");
+                document.getElementById("step-3").classList.add("active");
+                document.getElementById("btn-pay").disabled = true;
+                if (location.hash !== "#/pay/success") location.hash = "#/pay/success";
+                // 通知 Mock 供应商（第 2 层订单状态轮询的数据源）
+                fetch("/api/v1/travel/mock-supplier/orders/" + encodeURIComponent(orderNo) + "/paid", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" }
+                }).catch(function () {});
+            }
+        })();
+    </script>
+</body>
+</html>

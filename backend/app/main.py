@@ -115,6 +115,7 @@ app.include_router(events.router)
 app.include_router(tasks.router)
 app.include_router(orders.router)
 app.include_router(profiles.router)
+app.include_router(profiles.memory_router)
 app.include_router(feedback.router)
 app.include_router(evaluation.router)
 app.include_router(webhook_dingtalk.router)
@@ -126,11 +127,22 @@ app.include_router(debug.router)
 # 包含 Mock 收银台页（/mock/checkout.html，Playwright 下单自动化演示）
 project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 static_dir = os.path.join(project_dir, "static")
+if not os.path.exists(static_dir):
+    # 兼容根目录旧 static 目录回退
+    parent_static = os.path.join(os.path.dirname(project_dir), "static")
+    if os.path.exists(parent_static):
+        static_dir = parent_static
+
+media_dir = os.path.join(project_dir, "memory")
+if not os.path.exists(media_dir):
+    parent_media = os.path.join(os.path.dirname(project_dir), "memory")
+    if os.path.exists(parent_media):
+        media_dir = parent_media
+
+if os.path.exists(media_dir):
+    app.mount("/media", StaticFiles(directory=media_dir), name="media")
+
 if os.path.exists(static_dir):
-    # 记忆产物（二维码截图、L2/L3 md）通过 /media 暴露，供前端展示
-    media_dir = os.path.join(project_dir, "memory")
-    if os.path.exists(media_dir):
-        app.mount("/media", StaticFiles(directory=media_dir), name="media")
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 else:
     print(f"警告: 静态资源目录 '{static_dir}' 未找到。前端网页将无法托管服务。")

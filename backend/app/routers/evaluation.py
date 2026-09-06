@@ -89,8 +89,8 @@ async def find_by_session_id(
 
 @router.get("/api/v1/travel/debug/traces", response_model=List[TraceRowOut])
 async def find_by_time_range(
-    startAt: datetime = Query(...),
-    endAt: datetime = Query(...),
+    startAt: Optional[datetime] = Query(default=None),
+    endAt: Optional[datetime] = Query(default=None),
     onlyUnlabeled: Optional[bool] = Query(default=False),
     taskId: Optional[str] = Query(default=None),
     runId: Optional[str] = Query(default=None),
@@ -98,6 +98,12 @@ async def find_by_time_range(
     x_user_id: int = Header(default=1, alias="X-User-Id"),
     db: AsyncSession = Depends(get_db),
 ):
+    from datetime import timedelta
+    now = datetime.utcnow()
+    if endAt is None:
+        endAt = now
+    if startAt is None:
+        startAt = endAt - timedelta(days=7)
     if startAt >= endAt:
         raise HTTPException(status_code=400, detail="Trace 查询时间范围不合法")
     safe_limit = max(1, min(1000, limit or 200))

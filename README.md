@@ -19,42 +19,56 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
 
 ## 快速开始
 
-1. 安装依赖：
+项目分为 `backend/`（FastAPI）与 `frontend/`（Vue3 + Vite），本机可用 nginx（`nginx-1.30.4/`）组合演示。
 
-   ```bash
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
+### 1. 后端
 
-2. 配置环境变量：
+```bash
+cd backend
+pip install -r requirements.txt
+playwright install chromium
+cp .env.example .env   # 填写 DEEPSEEK_API_KEY 与 DATABASE_URL
+alembic upgrade head   # 建全库表结构与种子数据
+```
 
-   ```bash
-   cp .env.example .env
-   ```
+启动：
 
-   填写 `.env` 中的 `DEEPSEEK_API_KEY`（必填）与 `DATABASE_URL`（MySQL）。
+```bash
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-3. 初始化数据库：在 `order-agent` 目录执行 `alembic upgrade head`（Alembic 自动建全库表结构并写入种子数据；旧版手动 SQL 保留在 `sql/travel_tables.sql` 供参考，不再手工执行）。
+### 2. 前端
 
-4. 启动服务：
+开发模式（/api、/media 自动代理到 127.0.0.1:8000）：
 
-   ```bash
-   uvicorn app.main:app --host 127.0.0.1 --port 8090
-   ```
+```bash
+cd frontend
+npm install
+npm run dev        # http://127.0.0.1:5173
+```
 
-   打开 <http://127.0.0.1:8090> 即可使用。
+生产构建（输出到 `backend/static`，供 nginx 直接服务）：
+
+```bash
+cd frontend
+npm run build
+```
+
+### 3. nginx 生产演示（本机）
+
+```bash
+cd nginx-1.30.4
+nginx -p . -c conf/nginx.conf
+```
+
+访问 <http://127.0.0.1>：80 端口提供前端静态资源，`/api`、`/media`、`/api/v1/travel/events`(SSE) 反向代理到 127.0.0.1:8000。
 
 ## 目录结构
 
-- `app/`：后端代码（routers / services / agents / models / channels）
-- `alembic/`：数据库版本迁移（Alembic，含 baseline 全量建表）
-- `static/`：前端页面与 Mock 收银台
-- `prompts/`：Agent 提示词
-- `skills/`：领域技能（SKILL.md，含 RAG retriever 预留位，改文本无需改代码）
-- `sql/`：建表 SQL 存档（已被 Alembic 迁移取代）
-- `sql/backfills/`：存量数据一次性回填脚本
-- `replays/`：离线 Replay 实验留档
-- `tests/`：单元测试（pytest）；`tests_e2e_mock.py`：端到端测试
+- `backend/`：后端（app / alembic / prompts / skills / sql / replays / tests / static 等；`static/` 为前端构建产物与 Mock 收银台）
+- `frontend/`：Vue3 + Vite 前端源码（构建输出到 `backend/static`）
+- `nginx-1.30.4/`：本机 nginx 演示目录（本地运行，不入库；配置见 `conf/nginx.conf`）
+- `README.md`：本文件
 
 ## 调试与评估
 

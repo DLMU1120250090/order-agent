@@ -12,8 +12,12 @@ router = APIRouter(tags=["travel-chat"])
 
 def _to_chat_response(msg: OutboundMessage, session_id: str) -> TravelChatResponse:
     resp_type = {"CLARIFY": "CLARIFY", "TASK_PROGRESS": "TASK_PROGRESS"}.get(msg.kind, "ANSWER")
+    trace_id = None
+    if msg.correlation_id and (msg.correlation_id.startswith("trace_") or not msg.correlation_id.startswith("ORD")):
+        trace_id = msg.correlation_id
     return TravelChatResponse(
         sessionId=msg.session_id or session_id,
+        traceId=trace_id,
         responseType=resp_type,
         speechText=msg.text,
         displayBlocks=msg.blocks,

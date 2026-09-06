@@ -202,6 +202,8 @@ class TravelOrchestratorService:
                     ctx.record_event("USER_MESSAGE_RECORDED", "SESSION", inbound.text, {"sessionId": state.sessionId})
                     response = await self._handle_turn(db, user_id, inbound.text, state, ctx)
                     response.session_id = response.session_id or state.sessionId
+                    if not response.correlation_id:
+                        response.correlation_id = ctx.trace_id
                     ctx.record_event("REQUEST_FINISHED", "HTTP", inbound.model_dump(), response.model_dump())
                     return response
                 except Exception as e:  # noqa: BLE001

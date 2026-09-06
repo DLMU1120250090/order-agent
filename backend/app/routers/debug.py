@@ -69,10 +69,12 @@ async def debug_run_scheduler(request: Request):
         await scheduler._price_watch()
     elif job == "flight_monitor":
         await scheduler._flight_monitor()
+    elif job in ("memory_distill", "distill"):
+        await scheduler._memory_distill()
     else:
         return {
             "ok": False,
-            "error": f"未知 job: {job}，可选 departure_reminder / price_watch / flight_monitor",
+            "error": f"未知 job: {job}，可选 departure_reminder / price_watch / flight_monitor / memory_distill",
         }
     return {"ok": True, "job": job}
 
