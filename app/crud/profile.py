@@ -10,12 +10,6 @@ from app.models.schemas import UserProfile
 
 # ---------- 纯函数：乘客与偏好结构（Commit 1，可单测） ----------
 
-def _passenger_key(p: dict) -> str:
-    """乘客匹配键：passenger_id > id_no > name。"""
-    p = p or {}
-    return str(p.get("passenger_id") or p.get("id_no") or p.get("name") or "").strip()
-
-
 def _new_passenger_id(p: dict) -> str:
     """由证件号（兜底姓名）生成稳定 passenger_id（id_no sha256 前 12 位）。"""
     raw = str(p.get("id_no") or p.get("name") or "passenger").strip()
@@ -23,12 +17,20 @@ def _new_passenger_id(p: dict) -> str:
 
 
 def normalize_passengers(passengers) -> list:
-    """给乘客列表补齐 passenger_id / role（缺省：首个 self，其余 companion）。已存在的值不覆盖。"""
+    """给乘客列表补齐 passenger_id / role 并按 passenger_id 去重（同一乘客只保留一条）。
+
+    缺省 role：首个 self，其余 companion；已存在的值不覆盖。
+    """
     out = []
+    seen = set()
     for idx, raw in enumerate(passengers or []):
         item = dict(raw)
         if not item.get("passenger_id"):
             item["passenger_id"] = _new_passenger_id(item)
+        pid = str(item["passenger_id"])
+        if pid in seen:
+            continue
+        seen.add(pid)
         if "role" not in item:
             item["role"] = "self" if idx == 0 else "companion"
         out.append(item)
@@ -39,31 +41,30 @@ def merge_passengers(existing, incoming) -> list:
     """乘客簿合并：incoming 为主，按 passenger_id/id_no/name 匹配旧项。
 
     - 匹配到的旧项保留未传字段（passenger_id / role 等），避免支付回写整表覆盖丢字段；
+    - incoming 先归一化（补 passenger_id/role）再匹配，杜绝"已有 P_ 前缀 id 而原始乘客按
+      证件号匹配不上"导致的重复追加（修复 2026-09-06）；
     - 未匹配的旧项追加保留（乘客簿不清空，删除留待后续显式能力）。
     """
     existing = normalize_passengers(existing)
     incoming = incoming or []
     if not incoming:
         return existing
+    incoming = normalize_passengers(incoming)
     result = []
     seen = set()
-    for idx, raw in enumerate(incoming):
-        item = dict(raw)
-        key = _passenger_key(item)
-        matched = next((old for old in existing if _passenger_key(old) == key), None)
+    for item in incoming:
+        pid = str(item["passenger_id"])
+        if pid in seen:
+            continue
+        matched = next((old for old in existing if str(old.get("passenger_id")) == pid), None)
         if matched:
             merged = dict(matched)
             merged.update(item)
             item = merged
-        if not item.get("passenger_id"):
-            item["passenger_id"] = _new_passenger_id(item)
-        if "role" not in item:
-            has_self = any(p.get("role") == "self" for p in result)
-            item["role"] = "self" if (idx == 0 and not has_self) else "companion"
         result.append(item)
-        seen.add(key or item["passenger_id"])
+        seen.add(pid)
     for old in existing:
-        if _passenger_key(old) not in seen:
+        if str(old.get("passenger_id")) not in seen:
             result.append(dict(old))
     return result
 

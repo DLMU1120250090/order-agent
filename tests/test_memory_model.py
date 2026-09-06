@@ -42,6 +42,28 @@ def test_merge_passengers_keeps_old_role_and_extra_passenger():
     assert any(p["name"] == "李四" for p in merged)
 
 
+def test_normalize_passengers_deduplicates_by_id():
+    dup = [
+        {"name": "演示乘客", "id_no": "110101199001011234"},
+        {"name": "演示乘客", "id_no": "110101199001011234"},
+    ]
+    out = normalize_passengers(dup)
+    assert len(out) == 1
+
+
+def test_merge_raw_passenger_is_idempotent_across_payments():
+    """回归（2026-09-06）：订单回写的是不带 passenger_id 的原始乘客，
+    多次支付后乘客簿不应重复追加同一个人。"""
+    existing = normalize_passengers([{"name": "张三", "id_no": "X1", "role": "self", "id_expiry": "2030-01-01"}])
+    raw_incoming = [{"name": "张三", "id_no": "X1"}]
+    merged = existing
+    for _ in range(3):
+        merged = merge_passengers(merged, raw_incoming)
+    assert len(merged) == 1
+    assert merged[0]["role"] == "self"
+    assert merged[0]["id_expiry"] == "2030-01-01"
+
+
 def test_merge_preferences_v2_deep_merge():
     old = {
         "user": {"price_sensitivity": {"value": "high", "source": "rule"}},

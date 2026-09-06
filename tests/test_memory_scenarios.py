@@ -70,9 +70,11 @@ def test_monitor_threshold_boundaries():
 
 
 def test_reminder_departing_window_boundary():
-    now = datetime(2026, 9, 6, 12, 0)
-    # 出发时刻 = updated_at + 24h：updated 24h 前 → depart = now，落在 24h 窗口内
-    order2 = SimpleNamespace(updated_at=now - timedelta(hours=24))
-    assert ReminderService._departing_within(order2, hours=24) is True
-    order3 = SimpleNamespace(updated_at=now - timedelta(hours=25))
-    assert ReminderService._departing_within(order3, hours=24) is False
+    now = datetime.now()
+    # 出发时刻 = updated_at + 24h；用真实 now 构造，避开精确相等边界（微秒竞态）
+    depart_soon = SimpleNamespace(updated_at=now - timedelta(hours=23))
+    depart_later = SimpleNamespace(updated_at=now - timedelta(hours=1))
+    depart_past = SimpleNamespace(updated_at=now - timedelta(hours=25))
+    assert ReminderService._departing_within(depart_soon, hours=24) is True
+    assert ReminderService._departing_within(depart_later, hours=24) is True
+    assert ReminderService._departing_within(depart_past, hours=24) is False
