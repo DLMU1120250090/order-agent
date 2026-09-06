@@ -2,7 +2,7 @@
 
 import os
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import binding as binding_crud
@@ -13,8 +13,30 @@ from app.models.enums import OrderStatus
 from app.models.schemas import OutboundMessage
 from app.channels.dingtalk import dingtalk_channel
 from app.services.runtime import push_service, scheduler
+from app.services.replay import ReplayService
 
 router = APIRouter(tags=["travel-debug"])
+replay_service = ReplayService()
+
+
+@router.post("/api/v1/travel/debug/replay")
+async def replay_trace(
+    request: Request,
+    x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+):
+    """离线 Replay：Trace case → 规则层 dry-run → before/after 对比（Commit 3）。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    trace_id = (body.get("traceId") or "").strip()
+    if not trace_id:
+        raise HTTPException(status_code=400, detail="traceId 不能为空")
+    try:
+        return await replay_service.replay_trace(db, trace_id, x_user_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/api/v1/travel/debug/run-scheduler")

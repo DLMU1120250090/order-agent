@@ -44,6 +44,31 @@ class ItineraryPlanner:
         slots: TravelSlotBundle,
         profile: Optional[UserProfile] = None,
     ) -> PlanDecision:
+        """行程方案规划入口：计算候选 + 落库 Top3。
+
+        Commit 3：候选计算抽到 _plan_candidates（dry-run 不落库），供离线 Replay 复用。
+        """
+        decision = await self._plan_candidates(db, slots, profile)
+        if not decision.options:
+            return decision
+
+        # 落库 travel_plan（dry-run 不执行，避免重放污染业务数据）
+        trip = await trip_crud.create_or_get_trip(db, user_id, slots)
+        for opt in decision.options:
+            opt.trip_id = trip.id
+            plan_id = str(await trip_crud.save_plan(db, trip.id, opt))
+            opt.plan_id = plan_id
+            # 回填 plan_json.plan_id：下单幂等键依赖它，否则不同方案会撞车复用旧订单
+            await trip_crud.set_plan_id(db, int(plan_id))
+        return decision
+
+    async def _plan_candidates(
+        self,
+        db: AsyncSession,
+        slots: TravelSlotBundle,
+        profile: Optional[UserProfile] = None,
+    ) -> PlanDecision:
+        """候选生成 + 硬过滤 + 打分排序（不落库，供离线 Replay dry-run）。"""
         origin = (slots.origin or [None])[0] or (profile.home_city if profile and profile.home_city else "北京")
         destination = (slots.destination or ["上海"])[0]
         trip_date = (slots.tripDate or [datetime.now().strftime("%Y-%m-%d")])[0]
@@ -110,15 +135,6 @@ class ItineraryPlanner:
 
         options.sort(key=lambda o: o.score, reverse=True)
         top = options[:3]
-
-        # 落库 travel_plan
-        trip = await trip_crud.create_or_get_trip(db, user_id, slots)
-        for opt in top:
-            opt.trip_id = trip.id
-            plan_id = str(await trip_crud.save_plan(db, trip.id, opt))
-            opt.plan_id = plan_id
-            # 回填 plan_json.plan_id：下单幂等键依赖它，否则不同方案会撞车复用旧订单
-            await trip_crud.set_plan_id(db, int(plan_id))
 
         reason = "已按价格(40%)、耗时(30%)、时刻(20%)、偏好(10%)综合排序，供你选择。"
         return PlanDecision(options=top, recommended=top[0], reason=reason)
