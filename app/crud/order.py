@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import TravelOrderRow
 from app.services.trace import active_trace_ctx
+from app.services.trace_schema import EventType
 
 
 async def get_order_by_idempotency(db: AsyncSession, idempotency_key: str) -> Optional[TravelOrderRow]:
@@ -57,9 +58,11 @@ async def update_order(db: AsyncSession, order_id: int, **fields):
         ctx = active_trace_ctx.get()
         if ctx:
             ctx.record_event(
-                "ORDER_STATUS_CHANGED",
+                EventType.ORDER_STATUS_CHANGED,
                 "ORDER",
                 {"orderNo": row.order_no, "statusBefore": status_before},
                 {"statusAfter": row.status, "reason": reason, "actor": actor},
+                state_before=status_before,
+                state_after=row.status,
             )
     return row

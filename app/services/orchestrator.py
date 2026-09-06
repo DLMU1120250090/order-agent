@@ -38,6 +38,7 @@ from app.services.push import PushService
 from app.services.risk_guard import RiskGuardService
 from app.services.task import TaskService
 from app.services.trace import TraceContext, TraceScope, active_trace_ctx, traced_agent_call
+from app.services.trace_schema import EventType
 from app.database import async_session_maker
 
 log = logging.getLogger("travel.orchestrator")
@@ -276,7 +277,14 @@ class TravelOrchestratorService:
         profile = await self.memory.get_profile(db, user_id)
         resolved = self.memory_resolver.resolve(merged, profile, confirmed_fields=state.pendingConfirms or [])
         planning_slots = resolved.slots
-        ctx.record_event("MEMORY_RESOLVED", "MEMORY", {"userId": user_id}, resolved.to_dict())
+        ctx.record_event(
+            EventType.MEMORY_RESOLVED,
+            "MEMORY",
+            {"userId": user_id},
+            resolved.to_dict(),
+            memory_sources=sorted({info.source for info in resolved.inferred.values()}),
+            inferred_fields={name: info.to_dict() for name, info in resolved.inferred.items()},
+        )
 
         missing = self.clarify_rules.missing_slots(planning_slots, fuzzy_date=fuzzy)
         ctx.record_event(

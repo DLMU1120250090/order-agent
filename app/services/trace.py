@@ -6,7 +6,9 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.database import RequestTraceRow
+from app.services.trace_schema import EventType, TraceEventSchema
 
 log = logging.getLogger("diet.trace")
 
@@ -14,11 +16,10 @@ log = logging.getLogger("diet.trace")
 # 确保在单线程多协程并发状态下，各用户请求的日志完全隔离，绝不串话
 active_trace_ctx = contextvars.ContextVar("active_trace_ctx", default=None)
 
+
 class TraceEvent:
-    """
-    单条 Trace 轨迹事件明细。
-    记录某一步调用的时延、Token消耗、输入输出以及模型参数。
-    """
+    """单条 Trace 轨迹事件明细（Commit 5：字段由 TraceEventSchema 统一约束）。"""
+
     def __init__(
         self,
         step_order: int,
@@ -26,19 +27,31 @@ class TraceEvent:
         phase: str,
         agent_name: Optional[str] = None,
         model_name: Optional[str] = None,
+        tool_name: Optional[str] = None,
         input_payload: Optional[str] = None,
         output_payload: Optional[str] = None,
         latency_ms: Optional[int] = None,
         input_tokens: Optional[int] = None,
         output_tokens: Optional[int] = None,
         total_tokens: Optional[int] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        error_type: Optional[str] = None,
+        error_recoverable: Optional[bool] = None,
+        retry_no: Optional[int] = None,
+        decision: Optional[Dict[str, Any]] = None,
+        state_before: Any = None,
+        state_after: Any = None,
+        memory_sources: Optional[List[str]] = None,
+        memory_ids: Optional[List[str]] = None,
+        memory_version: Optional[str] = None,
+        inferred_fields: Optional[Dict[str, Any]] = None,
     ):
         self.step_order = step_order
         self.event_type = event_type
         self.phase = phase
         self.agent_name = agent_name
         self.model_name = model_name
+        self.tool_name = tool_name
         self.input_payload = input_payload
         self.output_payload = output_payload
         self.latency_ms = latency_ms
@@ -46,30 +59,69 @@ class TraceEvent:
         self.output_tokens = output_tokens
         self.total_tokens = total_tokens
         self.error_message = error_message
+        self.error_type = error_type
+        self.error_recoverable = error_recoverable
+        self.retry_no = retry_no
+        self.decision = decision
+        self.state_before = state_before
+        self.state_after = state_after
+        self.memory_sources = memory_sources
+        self.memory_ids = memory_ids
+        self.memory_version = memory_version
+        self.inferred_fields = inferred_fields
         self.created_at = datetime.utcnow().isoformat()
 
     def to_dict(self) -> dict:
-        """转为驼峰命名的字典格式，以便最终以 JSON 存入数据库"""
-        return {
-            "stepOrder": self.step_order,
-            "eventType": self.event_type,
-            "phase": self.phase,
-            "agentName": self.agent_name,
-            "modelName": self.model_name,
-            "inputPayload": self.input_payload,
-            "outputPayload": self.output_payload,
-            "latencyMs": self.latency_ms,
-            "inputTokens": self.input_tokens,
-            "outputTokens": self.output_tokens,
-            "totalTokens": self.total_tokens,
-            "errorMessage": self.error_message,
-            "createdAt": self.created_at
-        }
+        """经 TraceEventSchema 校验并序列化（排除 None，老解析 get 缺失键返回 None 兼容）。"""
+        try:
+            return TraceEventSchema(
+                stepOrder=self.step_order,
+                eventType=self.event_type,
+                phase=self.phase,
+                agentName=self.agent_name,
+                modelName=self.model_name,
+                toolName=self.tool_name,
+                inputPayload=self.input_payload,
+                outputPayload=self.output_payload,
+                latencyMs=self.latency_ms,
+                inputTokens=self.input_tokens,
+                outputTokens=self.output_tokens,
+                totalTokens=self.total_tokens,
+                errorMessage=self.error_message,
+                errorType=self.error_type,
+                errorRecoverable=self.error_recoverable,
+                retryNo=self.retry_no,
+                decision=self.decision,
+                stateBefore=self.state_before,
+                stateAfter=self.state_after,
+                memorySources=self.memory_sources,
+                memoryIds=self.memory_ids,
+                memoryVersion=self.memory_version,
+                inferredFields=self.inferred_fields,
+                createdAt=self.created_at,
+            ).model_dump(exclude_none=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("TraceEvent schema 校验失败，回退旧结构: %s", e)
+            return {
+                "stepOrder": self.step_order,
+                "eventType": self.event_type,
+                "phase": self.phase,
+                "agentName": self.agent_name,
+                "modelName": self.model_name,
+                "inputPayload": self.input_payload,
+                "outputPayload": self.output_payload,
+                "latencyMs": self.latency_ms,
+                "inputTokens": self.input_tokens,
+                "outputTokens": self.output_tokens,
+                "totalTokens": self.total_tokens,
+                "errorMessage": self.error_message,
+                "createdAt": self.created_at,
+            }
+
 
 class TraceContext:
-    """
-    单个请求生命周期内的 Trace 上下文管理器。
-    """
+    """单个请求生命周期内的 Trace 上下文管理器。"""
+
     def __init__(self, trace_id: str, session_id: str, user_id: int):
         self.trace_id = trace_id
         self.session_id = session_id
@@ -91,15 +143,37 @@ class TraceContext:
         phase: str,
         input_payload: Any,
         output_payload: Any,
-        latency_ms: Optional[int] = None
+        latency_ms: Optional[int] = None,
+        tool_name: Optional[str] = None,
+        state_before: Any = None,
+        state_after: Any = None,
+        decision: Optional[dict] = None,
+        memory_sources: Optional[List[str]] = None,
+        memory_ids: Optional[List[str]] = None,
+        memory_version: Optional[str] = None,
+        inferred_fields: Optional[dict] = None,
+        error_type: Optional[str] = None,
+        error_recoverable: Optional[bool] = None,
+        retry_no: Optional[int] = None,
     ):
-        """记录普通业务流事件"""
+        """记录普通业务流事件（Commit 5：支持 schema 化扩展字段）。"""
         self.record(
             event_type=event_type,
             phase=phase,
             input_payload=input_payload,
             output_payload=output_payload,
-            latency_ms=latency_ms
+            latency_ms=latency_ms,
+            tool_name=tool_name,
+            state_before=state_before,
+            state_after=state_after,
+            decision=decision,
+            memory_sources=memory_sources,
+            memory_ids=memory_ids,
+            memory_version=memory_version,
+            inferred_fields=inferred_fields,
+            error_type=error_type,
+            error_recoverable=error_recoverable,
+            retry_no=retry_no,
         )
 
     def record_error(self, event_type: str, phase: str, input_payload: Any, error: Exception):
@@ -111,7 +185,9 @@ class TraceContext:
             phase=phase,
             input_payload=input_payload,
             output_payload=None,
-            error_message=self.error_message
+            error_message=self.error_message,
+            error_type=error.__class__.__name__,
+            error_recoverable=False,
         )
 
     def record_agent_call(
@@ -122,28 +198,25 @@ class TraceContext:
         output_text: Optional[str],
         latency_ms: int,
         token_usage: Optional[dict] = None,
-        error: Optional[Exception] = None
+        error: Optional[Exception] = None,
     ):
-        """
-        特定于大模型/Agent 调用的日志记录。
-        能够捕获 LangChain 返回的 Token 使用量详情并计入指标。
-        """
+        """特定于大模型/Agent 调用的日志记录，捕获 Token 用量计入指标。"""
         input_tokens = None
         output_tokens = None
         total_tokens = None
-        
+
         if token_usage:
             input_tokens = token_usage.get("prompt_tokens")
             output_tokens = token_usage.get("completion_tokens")
             total_tokens = token_usage.get("total_tokens")
-            
+
         error_msg = f"{error.__class__.__name__}: {str(error)}" if error else None
         if error:
             self.status = "FAILED"
             self.error_message = error_msg
 
         self.record(
-            event_type="AGENT_CALL",
+            event_type=EventType.AGENT_CALL,
             phase="AGENT",
             agent_name=agent_name,
             model_name=model_name,
@@ -153,7 +226,9 @@ class TraceContext:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            error_message=error_msg
+            error_message=error_msg,
+            error_type=error.__class__.__name__ if error else None,
+            error_recoverable=False if error else None,
         )
 
     def record(
@@ -162,18 +237,27 @@ class TraceContext:
         phase: str,
         agent_name: Optional[str] = None,
         model_name: Optional[str] = None,
+        tool_name: Optional[str] = None,
         input_payload: Any = None,
         output_payload: Any = None,
         latency_ms: Optional[int] = None,
         input_tokens: Optional[int] = None,
         output_tokens: Optional[int] = None,
         total_tokens: Optional[int] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        error_type: Optional[str] = None,
+        error_recoverable: Optional[bool] = None,
+        retry_no: Optional[int] = None,
+        decision: Optional[dict] = None,
+        state_before: Any = None,
+        state_after: Any = None,
+        memory_sources: Optional[List[str]] = None,
+        memory_ids: Optional[List[str]] = None,
+        memory_version: Optional[str] = None,
+        inferred_fields: Optional[dict] = None,
     ):
-        """
-        通用事件落盘序列化。
-        具备最大 20000 字符的大报文截断保护，防止数据库溢出崩溃。
-        """
+        """通用事件落盘序列化（最大 20000 字符截断保护，防 DB 溢出崩溃）。"""
+
         def to_str(p: Any) -> Optional[str]:
             if p is None:
                 return None
@@ -191,26 +275,38 @@ class TraceContext:
             phase=phase,
             agent_name=agent_name,
             model_name=model_name,
+            tool_name=tool_name,
             input_payload=to_str(input_payload),
             output_payload=to_str(output_payload),
             latency_ms=latency_ms,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            error_message=to_str(error_message)
+            error_message=to_str(error_message),
+            error_type=error_type,
+            error_recoverable=error_recoverable,
+            retry_no=retry_no,
+            decision=decision,
+            state_before=state_before,
+            state_after=state_after,
+            memory_sources=memory_sources,
+            memory_ids=memory_ids,
+            memory_version=memory_version,
+            inferred_fields=inferred_fields,
         )
         self.events.append(event)
 
+
 class TraceScope:
     """
-    异步 Trace 范围上下文管理器。
-    对应 Java 中使用 ThreadLocal 实现的 TraceScope，用以完成无侵入式自动落库。
-    
+    异步 Trace 范围上下文管理器（ThreadLocal 的 asyncio 版本）。
+
     使用示例：
     async with TraceScope(db, sessionId, userId) as ctx:
         ctx.record_event(...)
-        # 退出 async with 时会自动计算耗时并完成数据库保存
+        # 退出 async with 时自动计算耗时并完成数据库保存
     """
+
     def __init__(
         self,
         db: AsyncSession,
@@ -241,14 +337,22 @@ class TraceScope:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         # 还原协程上下文变量状态
         active_trace_ctx.reset(self.token)
-        
+
         # 计算请求端到端总时间
         end_time_ns = time.time_ns()
         duration_ms = (end_time_ns - self.context.start_time_ns) // 1_000_000
-        
+
         if exc_val is not None:
-            self.context.record_error("REQUEST_FAILED", "HTTP", {}, exc_val)
-            
+            self.context.record_error(EventType.REQUEST_FAILED, "HTTP", {}, exc_val)
+
+        # Commit 5：事件级注入 runId/taskId（老事件无这些字段，不覆盖既有值）
+        events = [e.to_dict() for e in self.context.events]
+        for ev in events:
+            if self.run_id and "runId" not in ev:
+                ev["runId"] = self.run_id
+            if self.task_id and "taskId" not in ev:
+                ev["taskId"] = self.task_id
+
         trace_json = {
             "traceId": self.trace_id,
             "sessionId": self.session_id,
@@ -257,9 +361,9 @@ class TraceScope:
             "taskId": self.task_id,
             "status": self.context.status,
             "durationMs": duration_ms,
-            "events": [e.to_dict() for e in self.context.events]
+            "events": events,
         }
-        
+
         # 组装 RequestTraceRow 实体写入数据库
         db_trace = RequestTraceRow(
             trace_id=self.trace_id,
@@ -273,7 +377,7 @@ class TraceScope:
             task_id=self.task_id,
             trace_json=trace_json,
             created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            updated_at=datetime.utcnow(),
         )
         try:
             self.db.add(db_trace)
@@ -281,16 +385,15 @@ class TraceScope:
         except Exception as e:
             log.warning(f"无法保存 Trace 链路日志，traceId={self.trace_id}。异常为: {str(e)}")
 
+
 async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs: dict, user_input_text: str) -> Any:
-    """
-    无侵入式包装函数：运行任意 LangChain 链，并自动收集 Trace 信息。
-    """
+    """无侵入式包装函数：运行任意 LangChain 链，并自动收集 Trace 信息。"""
     ctx: Optional[TraceContext] = active_trace_ctx.get()
-    
+
     # 若传入的是自定义 Agent 包装类对象，自动解包出底层的 LangChain chain 实例
     if hasattr(chain, "chain"):
         chain = chain.chain
-    
+
     start_time_ns = time.time_ns()
     try:
         # 判断是异步 chain.ainvoke 还是同步 invoke
@@ -298,12 +401,12 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
             response = await chain.ainvoke(inputs)
         else:
             response = chain.invoke(inputs)
-            
+
         latency_ms = (time.time_ns() - start_time_ns) // 1_000_000
-        
+
         token_usage = None
         output_text = None
-        
+
         # 尝试提取 LangChain 各种标准对象携带的 Token 使用量元数据和内容字段
         if hasattr(response, "response_metadata"):
             token_usage = response.response_metadata.get("token_usage")
@@ -311,7 +414,7 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
             output_text = response.content
         else:
             output_text = str(response)
-            
+
         if ctx:
             ctx.record_agent_call(
                 agent_name=agent_name,
@@ -319,7 +422,7 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
                 input_text=user_input_text,
                 output_text=output_text,
                 latency_ms=latency_ms,
-                token_usage=token_usage
+                token_usage=token_usage,
             )
         return response
     except Exception as e:
@@ -331,7 +434,6 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
                 input_text=user_input_text,
                 output_text=None,
                 latency_ms=latency_ms,
-                error=e
+                error=e,
             )
         raise e
-

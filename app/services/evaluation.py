@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.agents.evaluation import EvaluationJudgeAgent
 from app.models.database import FeedbackRow, RequestTraceRow
 from app.models.schemas import EvaluationReport, EvaluationRequest, TraceEvaluationResult
+from app.services.trace_schema import EventType, TraceEventSchema
 
 log = logging.getLogger("travel.evaluation")
 
@@ -238,13 +239,18 @@ class EvaluationService:
         order_modified = False
         price_drop = False
 
-        for e in events:
+        for raw_e in events:
+            # Commit 5：写入与解析共用 TraceEventSchema（老事件缺少新字段时仍兼容）
+            try:
+                e = TraceEventSchema.model_validate(raw_e).model_dump(exclude_none=True)
+            except Exception:  # noqa: BLE001
+                e = raw_e
             ev_type = e.get("eventType")
             if not ev_type:
                 continue
-            if e.get("errorMessage") or ev_type == "REQUEST_FAILED":
+            if e.get("errorMessage") or ev_type == EventType.REQUEST_FAILED:
                 fallback_used = True
-            if ev_type == "AGENT_CALL" and e.get("totalTokens") is not None:
+            if ev_type == EventType.AGENT_CALL and e.get("totalTokens") is not None:
                 token_cost += int(e.get("totalTokens"))
                 has_token = True
 
@@ -256,37 +262,37 @@ class EvaluationService:
                 except Exception:
                     pass
 
-            if ev_type == "INTENT_REVISED":
+            if ev_type == EventType.INTENT_REVISED:
                 intent = output.get("intent") or intent
                 if "slots" in output:
                     slots = output.get("slots") or {}
-            elif ev_type == "SLOTS_MERGED":
+            elif ev_type == EventType.SLOTS_MERGED:
                 slots = output or {}
-            elif ev_type == "CLARIFY_DECISION":
+            elif ev_type == EventType.CLARIFY_DECISION:
                 clarify_action = output.get("action") or clarify_action
-            elif ev_type == "PLAN_RANKED":
+            elif ev_type == EventType.PLAN_RANKED:
                 plan_ranked = True
                 ranked = output.get("options") or []
                 ranked_ids.update(str(r) for r in ranked if r)
-            elif ev_type == "RESPONSE_READY":
+            elif ev_type == EventType.RESPONSE_READY:
                 final_text = output.get("speechText") or final_text
                 blocks = output.get("displayBlocks") or []
                 for b in blocks:
                     if isinstance(b, dict) and b.get("planId"):
                         response_ids.add(str(b.get("planId")))
-            elif ev_type == "BOOKING_STARTED":
+            elif ev_type == EventType.BOOKING_STARTED:
                 booking_started = True
-            elif ev_type == "PAYMENT_DETECTED":
+            elif ev_type == EventType.PAYMENT_DETECTED:
                 payment_detected = True
-            elif ev_type == "PAYMENT_CONFIRMED":
+            elif ev_type == EventType.PAYMENT_CONFIRMED:
                 payment_confirmed = True
-            elif ev_type == "ORDER_CHANGE_DECISION":
+            elif ev_type == EventType.ORDER_CHANGE_DECISION:
                 change_decision = output
-            elif ev_type == "PRICE_WATCH_SCANNED" or ev_type == "PRICE_DROP_DETECTED":
+            elif ev_type in (EventType.PRICE_WATCH_SCANNED, EventType.PRICE_DROP_DETECTED):
                 price_drop = True
-            elif ev_type in ("ORDER_CHANGED", "ORDER_REFUNDED"):
+            elif ev_type in (EventType.ORDER_CHANGED, EventType.ORDER_REFUNDED):
                 order_modified = True
-            elif ev_type == "ADJUST_CONTEXT_RESOLVED":
+            elif ev_type == EventType.ADJUST_CONTEXT_RESOLVED:
                 excluded_ids = output.get("excludePlanIds") or []
 
         hallucination_free = not response_ids or response_ids.issubset(ranked_ids)
