@@ -46,6 +46,7 @@ def serialize_slots_and_meta(state: SessionState) -> dict:
         "selectedPlanId": state.selectedPlanId,
         "orderId": state.orderId,
         "orderNo": state.orderNo,
+        "pendingConfirms": list(state.pendingConfirms),
     }
     return slots_dict
 
@@ -62,7 +63,7 @@ async def create_session(
     empty_slots = {
         "destination": [], "tripDate": [], "budget": [], "travelStyle": [],
         "transportMode": [], "companion": [],
-        "_meta": {"channel": channel.value, "currentIntent": None, "selectedPlanId": None, "orderId": None, "orderNo": None},
+        "_meta": {"channel": channel.value, "currentIntent": None, "selectedPlanId": None, "orderId": None, "orderNo": None, "pendingConfirms": []},
     }
     row = SessionRow(
         id=session_id,
@@ -153,6 +154,7 @@ async def load_session_state(
         selectedPlanId=meta.get("selectedPlanId"),
         orderId=meta.get("orderId"),
         orderNo=meta.get("orderNo"),
+        pendingConfirms=meta.get("pendingConfirms") or [],
     )
 
 

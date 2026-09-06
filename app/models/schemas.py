@@ -370,3 +370,5 @@ class SessionState(BaseModel):
     selectedPlanId: Optional[str] = None
     orderId: Optional[int] = None
     orderNo: Optional[str] = None
+    # Commit 2：Memory 推断字段待用户确认的名单（高影响字段）
+    pendingConfirms: List[str] = Field(default_factory=list)

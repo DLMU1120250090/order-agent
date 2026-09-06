@@ -31,6 +31,7 @@ from app.services.collector import DataCollectorService
 from app.services.date_resolver import DateConsistencyService, DateResolverService
 from app.services.intent_revise import IntentReviseService
 from app.services.memory import MemoryService
+from app.services.memory_context import MemoryResolver
 from app.services.mock_supplier import mock_supplier
 from app.services.planner import ItineraryPlanner
 from app.services.push import PushService
@@ -50,6 +51,11 @@ PAYMENT_CONFIRM_KEYWORDS = ["付好了", "已支付", "支付完成", "付完了
 CHANGE_CONFIRM_KEYWORDS = ["确认改签", "就改", "同意改", "确认改", "改签确认"]
 CANCEL_CONFIRM_KEYWORDS = ["确认退票", "确认退", "同意退", "退票确认"]
 MANUAL_ORDER_PATTERN = re.compile(r"订单号[是为：: ]*([A-Za-z0-9]+)")
+# Commit 2：Memory 推断值确认——简短肯定回复直接确认默认推断并规划
+MEMORY_CONFIRM_PATTERN = re.compile(
+    r"^(好的?|可以|行吧|行|嗯+|对|对的|是|是的|按这个|就这样|没问题|ok|okay|同意|好呀|好嘞|好滴|成)$",
+    re.IGNORECASE,
+)
 
 
 class TravelOrchestratorService:
@@ -85,6 +91,7 @@ class TravelOrchestratorService:
         self.date_resolver = DateResolverService()
         self.date_consistency = DateConsistencyService()
         self.planner = ItineraryPlanner(self.collector)
+        self.memory_resolver = MemoryResolver()
         self.session_locks = defaultdict(asyncio.Lock)
 
     async def handle_message(self, db: AsyncSession, inbound: InboundMessage) -> OutboundMessage:
@@ -158,6 +165,22 @@ class TravelOrchestratorService:
             msg = OutboundMessage(channel=state.channel.value, text=f"已登记订单 {order_no}（手动兜底）。")
             ctx.record_event("ORDER_REGISTERED_MANUAL", "ORDER", {"orderNo": order_no}, msg.model_dump())
             return self._finish(db, state, ctx, msg)
+
+        # ③.5 Memory 推断值确认快捷路径（Commit 2）
+        # 处于 CLARIFY 且有待确认推断字段时：简短肯定 → 直接按记忆默认值规划；
+        # 其它回复（否定/补充修正）→ 清空待确认项，走标准意图流重新理解。
+        if state.phase == SessionPhase.CLARIFY and state.pendingConfirms:
+            brief = text.strip().strip("。！!～~ ")
+            if MEMORY_CONFIRM_PATTERN.match(brief):
+                agent_set = self.agent_factory.get(state.sessionId)
+                empty_revised = IntentResultSchema(
+                    intent=Intent.PLAN_RECOMMENDATION.value,
+                    slots=TravelSlotBundle(),
+                    confidence=1.0,
+                )
+                return await self._handle_plan(db, user_id, text, state, ctx, agent_set, empty_revised, adjust=False)
+            state = state.model_copy(update={"pendingConfirms": []})
+            await self._save_state(db, state)
 
         # ④ 标准意图流
         agent_set = self.agent_factory.get(state.sessionId)
@@ -249,8 +272,21 @@ class TravelOrchestratorService:
         merged, fuzzy = await self._resolve_dates(db, merged)
         ctx.record_event("SLOTS_MERGED", "SLOT", {"stateSlots": state.slots.model_dump(), "intentSlots": revised.slots.model_dump()}, merged.model_dump())
 
-        missing = self.clarify_rules.missing_slots(merged, fuzzy_date=fuzzy)
-        ctx.record_event("CLARIFY_DECISION", "CLARIFY", merged.model_dump(), {"action": "ASK" if missing else "READY", "missingSlots": missing})
+        # Commit 2：Memory Resolver —— L1/L3 补全缺失字段并标记来源；高影响推断字段需确认
+        profile = await self.memory.get_profile(db, user_id)
+        resolved = self.memory_resolver.resolve(merged, profile, confirmed_fields=state.pendingConfirms or [])
+        planning_slots = resolved.slots
+        ctx.record_event("MEMORY_RESOLVED", "MEMORY", {"userId": user_id}, resolved.to_dict())
+
+        missing = self.clarify_rules.missing_slots(planning_slots, fuzzy_date=fuzzy)
+        ctx.record_event(
+            "CLARIFY_DECISION", "CLARIFY", planning_slots.model_dump(),
+            {
+                "action": "ASK" if (missing or resolved.pending_confirm) else "READY",
+                "missingSlots": missing,
+                "confirmFields": resolved.pending_confirm,
+            },
+        )
 
         if missing:
             # 日期先后校验（存在范围时）
@@ -263,6 +299,7 @@ class TravelOrchestratorService:
                 "phase": SessionPhase.CLARIFY,
                 "currentIntent": Intent.CLARIFY_NEEDED,
                 "slots": merged,
+                "pendingConfirms": [],
             })
             await self._save_state(db, clarify_state)
             msg = OutboundMessage(
@@ -274,16 +311,34 @@ class TravelOrchestratorService:
             ctx.record_event("RESPONSE_READY", "CLARIFY", {"missing": missing}, msg.model_dump())
             return self._finish(db, clarify_state, ctx, msg, clarify=True)
 
-        # 记忆注入（L1 画像 + L2 摘要 + L3 长期偏好快照）
-        profile = await self.memory.get_profile(db, user_id)
+        # Commit 2：高影响推断字段需显式确认（记忆辅助澄清，不替用户决定）
+        if resolved.pending_confirm:
+            question = self._memory_confirm_question(resolved)
+            confirm_state = state.model_copy(update={
+                "phase": SessionPhase.CLARIFY,
+                "currentIntent": Intent.CLARIFY_NEEDED,
+                "slots": merged,
+                "pendingConfirms": resolved.pending_confirm,
+            })
+            await self._save_state(db, confirm_state)
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                kind="CLARIFY",
+                text=question,
+                blocks=[],
+            )
+            ctx.record_event("RESPONSE_READY", "MEMORY_CONFIRM", {"confirmFields": resolved.pending_confirm}, msg.model_dump())
+            return self._finish(db, confirm_state, ctx, msg, clarify=True)
+
+        # 记忆注入（L2 摘要 + L3 长期偏好快照；L1 已由 MemoryResolver 消费）
         memory_context = await self.memory.build_context(db, user_id)
         ctx.record_event(
             "MEMORY_INJECTED", "MEMORY", {"userId": user_id},
             {"profile": profile.model_dump() if profile else None, "context": memory_context[:300]},
         )
 
-        decision = await self.planner.plan(db, user_id, merged, profile)
-        ctx.record_event("PLAN_RANKED", "PLAN", merged.model_dump(), {"optionCount": len(decision.options), "options": [o.plan_id for o in decision.options]})
+        decision = await self.planner.plan(db, user_id, planning_slots, profile)
+        ctx.record_event("PLAN_RANKED", "PLAN", planning_slots.model_dump(), {"optionCount": len(decision.options), "options": [o.plan_id for o in decision.options]})
 
         if not decision.options:
             reply = "没有满足约束的出行方案，请调整日期、目的地或预算。"
@@ -293,17 +348,18 @@ class TravelOrchestratorService:
         blocks = [self._plan_card(o, plan_no=idx) for idx, o in enumerate(decision.options, 1)]
         top_plans = [{"planId": o.plan_id, "legs": [l.model_dump() for l in o.legs], "totalPrice": o.total_price, "totalDurationH": o.total_duration_h, "score": o.score} for o in decision.options]
         speech = await self._recommend_speech(
-            db, state, ctx, agent_set, text, merged, top_plans, decision.reason, memory_context=memory_context,
+            db, state, ctx, agent_set, text, planning_slots, top_plans, decision.reason, memory_context=memory_context,
         )
 
         plan_ids = [o.plan_id for o in decision.options]
         new_state = state.model_copy(update={
             "phase": SessionPhase.PLAN,
             "currentIntent": Intent.PLAN_RECOMMENDATION,
-            "slots": merged,
+            "slots": planning_slots,
             "lastRecommendations": list(state.lastRecommendations) + plan_ids,
             "currentBatch": plan_ids,
             "selectedPlanId": decision.recommended.plan_id if decision.recommended else (plan_ids[0] if plan_ids else None),
+            "pendingConfirms": [],
         })
         await self._save_state(db, new_state)
         msg = OutboundMessage(channel=state.channel.value, kind="CARD", text=speech, blocks=blocks)
@@ -733,6 +789,22 @@ class TravelOrchestratorService:
         return self._finish(db, state, ctx, msg)
 
     # ---------- 工具方法 ----------
+
+    @staticmethod
+    def _memory_confirm_question(resolved) -> str:
+        """记忆推断确认话术（Commit 2）：模板生成，确定性可测，避免每次确认都调 LLM。"""
+        parts = []
+        slots = resolved.slots
+        for name in resolved.pending_confirm:
+            if name == "origin":
+                parts.append(f"从{slots.origin[0]}出发")
+            elif name == "budget":
+                parts.append(f"{slots.budget[0]}预算")
+            elif name == "transportMode":
+                parts.append(f"偏好{slots.transportMode[0]}")
+            else:
+                parts.append(str(resolved.inferred[name].value))
+        return "好的。还是按你平时常用的" + "、".join(parts) + "来帮你规划吗？回复“好”即可，或直接告诉我需要调整的地方。"
 
     async def _ask_clarify(self, db, state, ctx, agent_set, user_input, merged, missing) -> str:
         try:
