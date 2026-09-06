@@ -80,7 +80,9 @@ async def create_session(
 async def ensure_session(db: AsyncSession, session_id: str, user_id: int, channel: Channel = Channel.web):
     result = await db.execute(select(SessionRow).where(SessionRow.id == session_id, SessionRow.user_id == user_id))
     if not result.scalars().first():
-        await create_session(db, user_id, channel)
+        # 修复（2026-09-06）：必须复用传入的 session_id，否则会生成随机新会话 id，
+        # 调用方按原 id 再次查询仍找不到会话。
+        await create_session(db, user_id, channel, session_id=session_id)
 
 
 async def load_session_state(
