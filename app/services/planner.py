@@ -43,12 +43,14 @@ class ItineraryPlanner:
         user_id: int,
         slots: TravelSlotBundle,
         profile: Optional[UserProfile] = None,
+        decision_context: Optional[dict] = None,
     ) -> PlanDecision:
         """行程方案规划入口：计算候选 + 落库 Top3。
 
         Commit 3：候选计算抽到 _plan_candidates（dry-run 不落库），供离线 Replay 复用。
+        硬过滤只由当前需求/User 约束（slots）决定；乘客偏好只进软排序（经 Resolver 补入 slots）。
         """
-        decision = await self._plan_candidates(db, slots, profile)
+        decision = await self._plan_candidates(db, slots, profile, decision_context=decision_context)
         if not decision.options:
             return decision
 
@@ -67,6 +69,7 @@ class ItineraryPlanner:
         db: AsyncSession,
         slots: TravelSlotBundle,
         profile: Optional[UserProfile] = None,
+        decision_context: Optional[dict] = None,
     ) -> PlanDecision:
         """候选生成 + 硬过滤 + 打分排序（不落库，供离线 Replay dry-run）。"""
         # 上游 MemoryResolver 已把 EXPLICIT/CONFIRMED/INFERRED 补全进 slots（Commit 7）；
@@ -139,6 +142,12 @@ class ItineraryPlanner:
         top = options[:3]
 
         reason = "已按价格(40%)、耗时(30%)、时刻(20%)、偏好(10%)综合排序，供你选择。"
+        if decision_context:
+            passenger_prefs = (decision_context.get("passengerPreferences") or {})
+            transport = str(passenger_prefs.get("transport") or "").lower()
+            label = {"train": "高铁", "flight": "飞机", "bus": "大巴"}.get(transport)
+            if label:
+                reason = f"{reason}（已结合所选乘客偏好：{label}）"
         return PlanDecision(options=top, recommended=top[0], reason=reason)
 
     async def replan(

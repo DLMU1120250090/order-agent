@@ -39,9 +39,31 @@ BUDGET_LABEL_BY_TIER = {"economy": "经济型", "comfort": "舒适型", "premium
 # preferences_v2 transport 值 → 槽位中文标签
 TRANSPORT_LABEL_BY_VALUE = {"train": "高铁", "flight": "飞机", "bus": "大巴"}
 
+# 分化方案 P2：决策优先级链（集中登记；不同 workflow 可调整顺序）
+DECISION_PRIORITY_DEFAULT = [
+    "current_request",
+    "passenger_hard",
+    "user_hard",
+    "passenger_l3",
+    "user_l3",
+    "l2",
+    "default",
+]
+
+
+def decision_priority_chain(workflow: str = "planning") -> list:
+    """按 workflow 返回优先级链（本轮统一使用默认链，后续可扩展映射表）。"""
+    return list(DECISION_PRIORITY_DEFAULT)
+
 
 def _v2_user_prefs(profile: Optional[UserProfile]) -> dict:
     return ((profile.preferences_v2 or {}) if profile else {}).get("user") or {}
+
+
+def _v2_passenger_prefs(profile: Optional[UserProfile], passenger_id: str) -> dict:
+    if not profile:
+        return {}
+    return ((profile.preferences_v2 or {}).get("passengers") or {}).get(str(passenger_id)) or {}
 
 
 def _entry_value(entry, cast=float):
@@ -49,6 +71,22 @@ def _entry_value(entry, cast=float):
         return cast((entry or {}).get("value"))
     except (TypeError, ValueError):
         return None
+
+
+def _raw_value(entry) -> Any:
+    """取 entry 的 value（原样返回，不 cast）。"""
+    if isinstance(entry, dict) and "value" in entry:
+        return entry["value"]
+    return None
+
+
+def _passenger_entry_by_id(profile: Optional[UserProfile], passenger_id: str) -> Optional[dict]:
+    if not profile:
+        return None
+    for p in profile.passengers or []:
+        if str(p.get("passenger_id") or "") == str(passenger_id):
+            return p
+    return None
 
 
 def monitor_context_from_profile(profile: Optional[UserProfile]) -> dict:
@@ -113,11 +151,21 @@ class MemoryResolveResult:
     slots: TravelSlotBundle
     inferred: Dict[str, ResolvedSlotInfo] = field(default_factory=dict)
     pending_confirm: List[str] = field(default_factory=list)
+    user_constraints: Dict[str, Any] = field(default_factory=dict)
+    passenger_preferences: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "inferredFields": {k: v.to_dict() for k, v in self.inferred.items()},
             "pendingConfirm": list(self.pending_confirm),
+            "decisionContext": self.decision_context(),
+        }
+
+    def decision_context(self) -> dict:
+        """两层决策上下文：User 硬约束 vs 当前乘客软偏好（分化方案 P2）。"""
+        return {
+            "userConstraints": dict(self.user_constraints),
+            "passengerPreferences": dict(self.passenger_preferences),
         }
 
 
@@ -129,12 +177,35 @@ class MemoryResolver:
         slots: TravelSlotBundle,
         profile: Optional[UserProfile],
         confirmed_fields: Optional[List[str]] = None,
+        current_passenger_id: str = "0",
     ) -> MemoryResolveResult:
         confirmed = set(confirmed_fields or [])
         resolved_slots = slots.model_copy(deep=True)
         inferred: Dict[str, ResolvedSlotInfo] = {}
+        user_constraints: Dict[str, Any] = {}
+        passenger_preferences: Dict[str, Any] = {}
 
         if profile:
+            # 分化方案 P2：User 硬约束视图（预算档位 / 是否接受变动）
+            flat = profile.preferences or {}
+            user_constraints = {
+                "budgetLevel": profile.budget_level,
+                "tolerateChange": bool(flat.get("tolerate_change", True)),
+            }
+            # 分化方案 P2：当前乘客软偏好视图（本人=0；无乘客级则回退 user 桶 legacy）
+            passenger_bucket = _v2_passenger_prefs(profile, current_passenger_id)
+            passenger_entry = _passenger_entry_by_id(profile, current_passenger_id)
+            for key in ("transport", "time_window", "seat"):
+                entry = passenger_bucket.get(key) or _v2_user_prefs(profile).get(key)
+                value = _raw_value(entry)
+                if value is not None:
+                    passenger_preferences[key] = value
+            if passenger_entry and (passenger_entry.get("seat_need") or passenger_entry.get("age_group")):
+                passenger_preferences["l1"] = {
+                    "seatNeed": passenger_entry.get("seat_need"),
+                    "ageGroup": passenger_entry.get("age_group"),
+                }
+
             # L1：常驻城市补 origin
             if not resolved_slots.origin and profile.home_city:
                 resolved_slots.origin = [profile.home_city]
@@ -145,18 +216,20 @@ class MemoryResolver:
                 if label:
                     resolved_slots.budget = [label]
                     inferred["budget"] = ResolvedSlotInfo(profile.budget_level, source="l1_budget_level")
-            # L3（preferences_v2.user）：交通方式软偏好补 transportMode
-            v2_user = (profile.preferences_v2 or {}).get("user") or {}
-            transport_entry = v2_user.get("transport")
+            # L3：交通方式软偏好补 transportMode（当前乘客优先，user 桶回退 legacy）
+            transport_entry = (
+                passenger_bucket.get("transport")
+                or _v2_user_prefs(profile).get("transport")
+            )
             if not resolved_slots.transportMode and transport_entry:
-                value = str(transport_entry.get("value", "")).lower()
+                value = str(_raw_value(transport_entry) or "").lower()
                 label = TRANSPORT_LABEL_BY_VALUE.get(value)
                 if label:
                     resolved_slots.transportMode = [label]
                     inferred["transportMode"] = ResolvedSlotInfo(
                         value,
                         source="l3_preference",
-                        confidence=transport_entry.get("confidence"),
+                        confidence=(transport_entry or {}).get("confidence"),
                     )
 
         for name, info in inferred.items():
@@ -168,7 +241,13 @@ class MemoryResolver:
             for name in HIGH_IMPACT_CONFIRM_FIELDS
             if name in inferred and inferred[name].status == SlotStatus.INFERRED_FROM_MEMORY
         ]
-        return MemoryResolveResult(slots=resolved_slots, inferred=inferred, pending_confirm=pending)
+        return MemoryResolveResult(
+            slots=resolved_slots,
+            inferred=inferred,
+            pending_confirm=pending,
+            user_constraints=user_constraints,
+            passenger_preferences=passenger_preferences,
+        )
 
 
 class MemoryContextBuilder:

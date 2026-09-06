@@ -6,7 +6,12 @@ from app.models.schemas import TravelSlotBundle, UserProfile
 from app.crud.session import parse_slots_and_meta, serialize_slots_and_meta
 from app.models.enums import Channel, Intent, SessionPhase
 from app.models.schemas import SessionState
-from app.services.memory_context import MemoryResolver, SlotStatus
+from app.services.memory_context import (
+    DECISION_PRIORITY_DEFAULT,
+    MemoryResolver,
+    SlotStatus,
+    decision_priority_chain,
+)
 from app.services.orchestrator import MEMORY_CONFIRM_PATTERN, TravelOrchestratorService
 
 
@@ -67,6 +72,41 @@ def test_confirm_question_template():
     assert "从北京出发" in q
     assert "经济型预算" in q
     assert "回复“好”即可" in q
+
+
+def test_resolve_uses_current_passenger_preferences():
+    profile = _profile(home_city="北京", budget_level="economy")
+    profile.passengers = [{"passenger_id": "P_A", "name": "家人", "role": "others", "seat_need": "window"}]
+    profile.preferences_v2["passengers"] = {
+        "P_A": {"transport": {"value": "train", "confidence": 0.9, "source": "distilled"}},
+    }
+    slots = TravelSlotBundle(destination=["上海"], tripDate=["2026-09-10"], budget=["经济型"])
+    result = MemoryResolver().resolve(slots, profile, current_passenger_id="P_A")
+    assert result.slots.transportMode == ["高铁"]
+    ctx = result.decision_context()
+    assert ctx["passengerPreferences"]["transport"] == "train"
+    assert ctx["passengerPreferences"]["l1"]["seatNeed"] == "window"
+    assert ctx["userConstraints"]["budgetLevel"] == "economy"
+    assert result.to_dict()["decisionContext"]["userConstraints"]["budgetLevel"] == "economy"
+
+
+def test_current_request_beats_passenger_l3():
+    profile = _profile(home_city="北京")
+    profile.passengers = [{"passenger_id": "P_A", "name": "家人", "role": "others"}]
+    profile.preferences_v2["passengers"] = {
+        "P_A": {"transport": {"value": "train", "source": "distilled"}},
+    }
+    slots = TravelSlotBundle(origin=["北京"], destination=["上海"], tripDate=["2026-09-10"], transportMode=["飞机"])
+    result = MemoryResolver().resolve(slots, profile, current_passenger_id="P_A")
+    assert result.slots.transportMode == ["飞机"]
+    assert "transportMode" not in result.inferred
+
+
+def test_decision_priority_chain_order():
+    chain = decision_priority_chain("planning")
+    assert chain == DECISION_PRIORITY_DEFAULT
+    assert chain[:3] == ["current_request", "passenger_hard", "user_hard"]
+    assert chain[-2:] == ["l2", "default"]
 
 
 def test_confirm_pattern_full_match():

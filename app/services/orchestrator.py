@@ -373,7 +373,11 @@ class TravelOrchestratorService:
 
         # Commit 2：Memory Resolver —— L1/L3 补全缺失字段并标记来源；高影响推断字段需确认
         profile = await self.memory.get_profile(db, user_id)
-        resolved = self.memory_resolver.resolve(merged, profile, confirmed_fields=state.pendingConfirms or [])
+        resolved = self.memory_resolver.resolve(
+            merged, profile,
+            confirmed_fields=state.pendingConfirms or [],
+            current_passenger_id=state.currentPassengerId,
+        )
         planning_slots = resolved.slots
         ctx.record_event(
             EventType.MEMORY_RESOLVED,
@@ -449,7 +453,10 @@ class TravelOrchestratorService:
             },
         )
 
-        decision = await self.planner.plan(db, user_id, planning_slots, profile)
+        decision = await self.planner.plan(
+            db, user_id, planning_slots, profile,
+            decision_context=resolved.decision_context(),
+        )
         ctx.record_event("PLAN_RANKED", "PLAN", planning_slots.model_dump(), {"optionCount": len(decision.options), "options": [o.plan_id for o in decision.options]})
 
         if not decision.options:
