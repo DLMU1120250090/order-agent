@@ -33,7 +33,7 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
 
    填写 `.env` 中的 `DEEPSEEK_API_KEY`（必填）与 `DATABASE_URL`（MySQL）。
 
-3. 初始化数据库：执行 `sql/travel_tables.sql` 建表。
+3. 初始化数据库：在 `order-agent` 目录执行 `alembic upgrade head`（Alembic 自动建全库表结构并写入种子数据；旧版手动 SQL 保留在 `sql/travel_tables.sql` 供参考，不再手工执行）。
 
 4. 启动服务：
 
@@ -46,9 +46,10 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
 ## 目录结构
 
 - `app/`：后端代码（routers / services / agents / models / channels）
+- `alembic/`：数据库版本迁移（Alembic，含 baseline 全量建表）
 - `static/`：前端页面与 Mock 收银台
 - `prompts/`：Agent 提示词
-- `sql/`：建表 SQL
+- `sql/`：建表 SQL 存档（已被 Alembic 迁移取代）
 - `tests_e2e_mock.py`：端到端测试
 
 ## 说明
