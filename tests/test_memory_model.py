@@ -12,21 +12,36 @@ from app.crud.profile import (
 
 def test_normalize_passengers_fills_id_and_role():
     out = normalize_passengers([{"name": "张三", "id_no": "110101199001011234"}])
-    assert out[0]["passenger_id"].startswith("P_")
+    assert out[0]["passenger_id"] == "0"  # 单人无标记默认本人（A1）
     assert out[0]["role"] == "self"
 
 
-def test_passenger_id_stable_and_unique():
-    a = normalize_passengers([{"name": "张三", "id_no": "110101199001011234"}])[0]["passenger_id"]
-    b = normalize_passengers([{"name": "李四", "id_no": "110101199001011234"}])[0]["passenger_id"]
+def test_non_self_passenger_id_stable_and_unique():
+    a = normalize_passengers([{"name": "张三", "id_no": "110101199001011234", "role": "others"}])[0]["passenger_id"]
+    b = normalize_passengers([{"name": "李四", "id_no": "110101199001011234", "role": "others"}])[0]["passenger_id"]
     assert a == b
+    assert a.startswith("P_")
     two = normalize_passengers([
         {"name": "张三", "id_no": "A"},
         {"name": "李四", "id_no": "B"},
     ])
-    assert two[0]["role"] == "self"
-    assert two[1]["role"] == "companion"
+    # 多乘客无显式标记时不猜本人（不依赖列表位置）
+    assert two[0]["role"] == "others"
+    assert two[1]["role"] == "others"
     assert two[0]["passenger_id"] != two[1]["passenger_id"]
+
+
+def test_explicit_self_normalized_to_id_zero():
+    self_single = normalize_passengers([{"name": "本人", "id_no": "S1", "role": "self"}])[0]
+    assert self_single["passenger_id"] == "0"
+    assert self_single["role"] == "self"
+    mixed = normalize_passengers([
+        {"name": "本人", "id_no": "S1", "passenger_id": "P_old", "role": "self"},
+        {"name": "家人", "id_no": "F1", "role": "companion"},
+    ])
+    assert mixed[0]["passenger_id"] == "0"
+    assert mixed[1]["role"] == "others"
+    assert mixed[1]["passenger_id"].startswith("P_")
 
 
 def test_merge_passengers_keeps_old_role_and_extra_passenger():

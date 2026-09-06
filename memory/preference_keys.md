@@ -23,3 +23,10 @@
 ## 修订记录
 
 - 2026-09-06（Commit 0）：price_monitor 接入 scheduler 读方；early_bird 增加规则写方；schemas 注释清理；本清单落库（order-agent/memory/）。
+
+## 补充：身份与角色定义（分化方案 A1，2026-09-06）
+
+- 本人：`passenger_id = "0"` 且 `role = "self"`（读方判定：id=="0" 或 role=="self" 二选一/并用）；
+- 其余乘客：`role = "others"`（历史 `companion` 并入 others，读方兼容期两者都接受）；
+- 不记录 User↔Passenger 关系表；当前单 User（user_id=1）；
+- 多乘客且无显式标记时不猜本人（不依赖列表位置）；单人无标记默认本人（本人购票兜底）。

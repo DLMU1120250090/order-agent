@@ -243,7 +243,9 @@ class UserProfile(BaseModel):
     """L1 用户画像（C2 定稿）"""
     user_id: int
     home_city: Optional[str] = None
-    passengers: List[dict] = Field(default_factory=list)  # [{name, id_type, id_no, id_expiry}]
+    # 乘客簿：本人 passenger_id="0"/role=self；其余 role=others。
+    # 可选字段（自由 dict 透传，不强制）：name/id_type/id_no/id_expiry/age_group/seat_need 等
+    passengers: List[dict] = Field(default_factory=list)
     budget_level: Optional[str] = None  # economy / comfort / premium
     preferences: dict = Field(default_factory=dict)  # price_monitor/early_bird/tolerate_change/positive_feedback/negative_feedback/switch_count
     # Commit 1：带 subject/source/confidence 的偏好（{"user": {...}, "passengers": {"P_xxx": {...}}}）
