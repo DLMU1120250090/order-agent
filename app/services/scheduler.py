@@ -20,6 +20,16 @@ from app.services.task import TaskService
 log = logging.getLogger("travel.scheduler")
 
 
+def price_monitor_enabled(preferences) -> bool:
+    """价格监控总开关：读 preferences.price_monitor，未设置视为开启。
+
+    Commit 0：修复"写而不读"——之前 orchestrator 可关闭开关，但调度器
+    price_watch 从不读取，用户关掉价格监控实际仍会推送。
+    """
+    prefs = preferences or {}
+    return bool(prefs.get("price_monitor", True))
+
+
 class SchedulerService:
     """
     定时任务（A3 定稿，APScheduler AsyncIOScheduler）。
@@ -59,9 +69,20 @@ class SchedulerService:
 
     async def _price_watch(self):
         async with async_session_maker() as db:
+            # 价格监控总开关（preferences.price_monitor，未设置视为开启；按用户缓存避免重复查库）
+            enabled_cache: dict = {}
+
+            async def is_enabled(user_id: int) -> bool:
+                if user_id not in enabled_cache:
+                    profile = await self.memory.get_profile(db, user_id)
+                    enabled_cache[user_id] = price_monitor_enabled(profile.preferences if profile else None)
+                return enabled_cache[user_id]
+
             # 阶段1：进行中的行程需求（PLANNING）
             res = await db.execute(select(TravelTripRow).where(TravelTripRow.status == "PLANNING"))
             for trip in res.scalars().all():
+                if not await is_enabled(trip.user_id):
+                    continue
                 task_id = await self.task_service.create(
                     db, trip.user_id, TaskType.price_watch.value,
                     {"trip_id": trip.id, "phase": 1}, channel="web",
@@ -76,6 +97,8 @@ class SchedulerService:
             # 阶段2：已出票订单在出发窗口内
             res2 = await db.execute(select(TravelOrderRow).where(TravelOrderRow.status == OrderStatus.PAID.value))
             for order in res2.scalars().all():
+                if not await is_enabled(order.user_id):
+                    continue
                 task_id = await self.task_service.create(
                     db, order.user_id, TaskType.price_watch.value,
                     {"order_no": order.order_no, "phase": 2}, channel=order.channel, order_id=order.id,

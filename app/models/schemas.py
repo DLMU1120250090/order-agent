@@ -245,7 +245,7 @@ class UserProfile(BaseModel):
     home_city: Optional[str] = None
     passengers: List[dict] = Field(default_factory=list)  # [{name, id_type, id_no, id_expiry}]
     budget_level: Optional[str] = None  # economy / comfort / premium
-    preferences: dict = Field(default_factory=dict)  # cost_vs_time/tolerate_change/preferred_transport/seat_pref/early_bird
+    preferences: dict = Field(default_factory=dict)  # price_monitor/early_bird/tolerate_change/positive_feedback/negative_feedback/switch_count
 
 
 class TripSummary(BaseModel):

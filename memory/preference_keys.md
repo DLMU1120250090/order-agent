@@ -1,0 +1,25 @@
+# L1 偏好 key 写读审计清单（Commit 0，2026-09-06）
+
+> 目的：让每个偏好 key 都有明确的写方与读方，消灭"写而不读 / 读而无写"的死偏好。
+
+## preferences 字典内 key
+
+| key | 写方 | 读方 | 处置 | 说明 |
+| --- | --- | --- | --- | --- |
+| price_monitor | `app/services/orchestrator.py::_handle_price_monitor` | `app/services/scheduler.py::_price_watch`（Commit 0 新增） | 已对齐 | 默认开启；关闭后 price_watch 阶段 1/2 均跳过该用户，航变/出发提醒不受影响 |
+| early_bird | `app/services/orchestrator.py::_write_profile_after_booking`（Commit 0 新增，首段出发 < 08:00） | `app/services/planner.py`（时刻分加分） | 已对齐 | 此前"读而无写"恒 False |
+| tolerate_change | `app/routers/profiles.py` PUT preferences（人工/前端录入） | `app/services/change_decision.py::_score` | 保留 | 仅影响 preference 软分，成本最优选择优先 |
+| positive_feedback / negative_feedback / switch_count | `app/routers/feedback.py` | 无直接业务读取；全量随 profile 进入 L3 distill 上下文 | 保留（供蒸馏） | 计数型，暂不参与排序 |
+| cost_vs_time / preferred_transport / seat_pref | 无 | 无 | 已从 schemas 注释移除 | 未实现的 key 不再留在注释里误导 |
+
+## profile 顶层字段（不属于 preferences，附注）
+
+| 字段 | 写方 | 读方 |
+| --- | --- | --- |
+| home_city | 支付收尾 `_write_profile_after_booking` / profiles API | planner 出发地默认、memory.build_context |
+| budget_level | 支付收尾 `_write_profile_after_booking` / profiles API | memory.build_context / distill |
+| passengers | 支付收尾 `_write_profile_after_booking` / profiles API | booking 默认乘客、reminder 证件检查 |
+
+## 修订记录
+
+- 2026-09-06（Commit 0）：price_monitor 接入 scheduler 读方；early_bird 增加规则写方；schemas 注释清理；本清单落库（order-agent/memory/）。

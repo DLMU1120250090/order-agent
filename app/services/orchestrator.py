@@ -889,6 +889,17 @@ class TravelOrchestratorService:
         )]
         return active[0] if active else None
 
+    @staticmethod
+    def _is_early_departure(depart: str) -> bool:
+        """是否早班：首段出发时刻早于 08:00（Commit 0 规则写入 early_bird 偏好）。"""
+        if not depart:
+            return False
+        try:
+            hour = int(str(depart).split(":", 1)[0])
+        except (TypeError, ValueError):
+            return False
+        return 0 <= hour < 8
+
     async def _write_profile_after_booking(self, db, user_id, order, state):
         legs = (order.legs or {}).get("legs", [])
         home_city = legs[0].get("from_city") if legs else None
@@ -902,6 +913,8 @@ class TravelOrchestratorService:
             fields["passengers"] = passengers
         if budget_level:
             fields["budget_level"] = budget_level
+        if legs and self._is_early_departure(legs[0].get("depart", "")):
+            fields["preferences"] = {"early_bird": True}
         if fields:
             await self.memory.update_profile(db, user_id, **fields)
             ctx = active_trace_ctx.get()
