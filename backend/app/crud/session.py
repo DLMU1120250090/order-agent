@@ -250,3 +250,125 @@ async def latest_session_id(
     )
     res = await db.execute(query)
     return res.scalars().first()
+
+
+async def list_user_sessions(
+    db: AsyncSession,
+    user_id: int,
+    limit: int = 50,
+) -> List[dict]:
+    """返回该用户的历史会话列表，按更新时间倒序。自动解析标题与消息数。"""
+    safe_limit = max(1, min(100, limit))
+    stmt = (
+        select(SessionRow)
+        .where(SessionRow.user_id == user_id)
+        .order_by(desc(SessionRow.updated_at))
+        .limit(safe_limit)
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    sessions = []
+    for r in rows:
+        slots_val = r.slots
+        if isinstance(slots_val, str):
+            try:
+                slots_val = json.loads(slots_val)
+            except Exception:
+                slots_val = {}
+        elif not isinstance(slots_val, dict):
+            slots_val = {}
+
+        meta = slots_val.get("_meta") or {}
+        title = meta.get("title")
+
+        # 若未指定自定义标题，查询该会话第一条用户输入内容作为标题
+        if not title:
+            msg_res = await db.execute(
+                select(SessionMessageRow.content)
+                .where(
+                    SessionMessageRow.session_id == r.id,
+                    SessionMessageRow.role == "user",
+                )
+                .order_by(SessionMessageRow.created_at.asc())
+                .limit(1)
+            )
+            first_user_msg = msg_res.scalars().first()
+            if first_user_msg:
+                first_clean = first_user_msg.replace("\r", "").replace("\n", " ").strip()
+                title = first_clean[:28] if len(first_clean) > 28 else first_clean
+            else:
+                title = "新出行规划会话"
+
+        # 统计消息数量
+        cnt_res = await db.execute(
+            select(func.count(SessionMessageRow.id))
+            .where(SessionMessageRow.session_id == r.id)
+        )
+        msg_count = cnt_res.scalar() or 0
+
+        sessions.append({
+            "sessionId": r.id,
+            "title": title,
+            "phase": r.phase,
+            "createdAt": r.created_at.isoformat() if r.created_at else None,
+            "updatedAt": r.updated_at.isoformat() if r.updated_at else None,
+            "messageCount": msg_count,
+        })
+    return sessions
+
+
+async def delete_session(
+    db: AsyncSession,
+    session_id: str,
+    user_id: int,
+) -> bool:
+    """删除指定会话及其所有关联消息。"""
+    from sqlalchemy import delete
+    sess_res = await db.execute(
+        select(SessionRow).where(SessionRow.id == session_id, SessionRow.user_id == user_id)
+    )
+    row = sess_res.scalars().first()
+    if not row:
+        return False
+
+    await db.execute(
+        delete(SessionMessageRow).where(SessionMessageRow.session_id == session_id)
+    )
+    await db.delete(row)
+    await db.commit()
+    return True
+
+
+async def update_session_title(
+    db: AsyncSession,
+    session_id: str,
+    user_id: int,
+    title: str,
+) -> bool:
+    """修改会话自定义标题，保存在 slots._meta.title 中。"""
+    sess_res = await db.execute(
+        select(SessionRow).where(SessionRow.id == session_id, SessionRow.user_id == user_id)
+    )
+    row = sess_res.scalars().first()
+    if not row:
+        return False
+
+    slots_val = row.slots
+    if isinstance(slots_val, str):
+        try:
+            slots_val = json.loads(slots_val)
+        except Exception:
+            slots_val = {}
+    elif not isinstance(slots_val, dict):
+        slots_val = {}
+
+    if "_meta" not in slots_val or not isinstance(slots_val["_meta"], dict):
+        slots_val["_meta"] = {}
+    slots_val["_meta"]["title"] = title
+
+    row.slots = slots_val
+    row.updated_at = datetime.datetime.now()
+    db.add(row)
+    await db.commit()
+    return True
