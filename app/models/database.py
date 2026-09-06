@@ -164,6 +164,8 @@ class UserProfileRow(SQLModel, table=True):
     passengers: Dict[str, Any] = Field(sa_column=Column(JSON, nullable=True))
     budget_level: Optional[str] = Field(default=None, max_length=16)
     preferences: Dict[str, Any] = Field(sa_column=Column(JSON, nullable=True))
+    # Commit 1：带 subject/source/confidence 的偏好 v2（{"user": {...}, "passengers": {"P_xxx": {...}}}）
+    preferences_v2: Dict[str, Any] = Field(sa_column=Column(JSON, nullable=True))
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -175,6 +177,8 @@ class TripSummaryRow(SQLModel, table=True):
     user_id: int = Field(index=True)
     trip_id: Optional[int] = None
     summary_md: str = Field(...)
+    # Commit 1：结构化 Episode（决策输入来源；summary_md 保留为 LLM 派生文本）
+    episode_json: Dict[str, Any] = Field(sa_column=Column(JSON, nullable=True))
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -44,8 +44,16 @@ class MemoryService:
     async def update_profile(self, db: AsyncSession, user_id: int, **fields) -> Optional[UserProfile]:
         return await profile_crud.update_profile(db, user_id, **fields)
 
-    async def add_trip_summary(self, db: AsyncSession, user_id: int, trip_id: Optional[int], summary_md: str):
-        row = TripSummaryRow(user_id=user_id, trip_id=trip_id, summary_md=summary_md)
+    async def add_trip_summary(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        trip_id: Optional[int],
+        summary_md: str,
+        episode: Optional[dict] = None,
+    ):
+        """L2 落库：summary_md（LLM 派生文本）+ episode_json（结构化字段，Commit 1）。"""
+        row = TripSummaryRow(user_id=user_id, trip_id=trip_id, summary_md=summary_md, episode_json=episode)
         db.add(row)
         await db.commit()
         # md 双写：memory/trips/YYYY-MM-DD.md
@@ -53,6 +61,52 @@ class MemoryService:
         with open(md_path, "a", encoding="utf-8") as f:
             f.write(f"\n\n## {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{summary_md}\n")
         return row
+
+    async def get_preference(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        key: str,
+        passenger_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """统一偏好读取：passenger 级 v2 > user 级 v2 > flat（legacy）。返回条目 dict（含 value）或 None。"""
+        profile = await self.get_profile(db, user_id)
+        if not profile:
+            return None
+        return profile_crud.resolve_preference(
+            profile.preferences_v2, profile.preferences, key, passenger_id=passenger_id
+        )
+
+    async def update_preference(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        key: str,
+        value,
+        passenger_id: Optional[str] = None,
+        confidence: Optional[float] = None,
+        source: str = "rule",
+    ) -> Optional[UserProfile]:
+        """统一偏好写入（Commit 1）：user 级（默认）或 passenger 级，写入 preferences_v2 带 value/confidence/source。"""
+        profile = await self.get_profile(db, user_id)
+        v2 = dict(profile.preferences_v2 or {}) if profile else {}
+        bucket_key = "passengers" if passenger_id else "user"
+        bucket = dict(v2.get(bucket_key) or {})
+        if passenger_id:
+            prefs = dict(bucket.get(str(passenger_id)) or {})
+        else:
+            prefs = bucket
+        entry = {"value": value, "source": source}
+        if confidence is not None:
+            entry["confidence"] = float(confidence)
+        prefs[key] = entry
+        if passenger_id:
+            bucket[str(passenger_id)] = prefs
+        else:
+            bucket = prefs
+        v2[bucket_key] = bucket
+        await self.update_profile(db, user_id, preferences_v2=v2)
+        return await self.get_profile(db, user_id)
 
     async def recent_summaries(self, db: AsyncSession, user_id: int, n: int = 30) -> List[str]:
         res = await db.execute(

@@ -246,6 +246,8 @@ class UserProfile(BaseModel):
     passengers: List[dict] = Field(default_factory=list)  # [{name, id_type, id_no, id_expiry}]
     budget_level: Optional[str] = None  # economy / comfort / premium
     preferences: dict = Field(default_factory=dict)  # price_monitor/early_bird/tolerate_change/positive_feedback/negative_feedback/switch_count
+    # Commit 1：带 subject/source/confidence 的偏好（{"user": {...}, "passengers": {"P_xxx": {...}}}）
+    preferences_v2: dict = Field(default_factory=dict)
 
 
 class TripSummary(BaseModel):
@@ -254,6 +256,7 @@ class TripSummary(BaseModel):
     user_id: int
     trip_id: Optional[int] = None
     summary_md: str
+    episode: Optional[dict] = Field(default=None, description="结构化 Episode（episode_json）")
     created_at: Optional[datetime] = None
 
 

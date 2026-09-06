@@ -927,9 +927,48 @@ class TravelOrchestratorService:
             async with async_session_maker() as db:
                 legs = (order.legs or {}).get("legs", [])
                 md = await self._build_summary_md(db, user_id, order, legs)
-                await self.memory.add_trip_summary(db, user_id, order.trip_id, md)
+                episode = self._build_episode(user_id, order, state, legs)
+                await self.memory.add_trip_summary(db, user_id, order.trip_id, md, episode=episode)
         except Exception as e:  # noqa: BLE001
             log.warning("L2 摘要写入失败: %s", e)
+
+    def _build_episode(self, user_id: int, order, state, legs: List[dict]) -> dict:
+        """构造结构化 Episode（L2，Commit 1）：程序字段落库；decision_reason/rating 本轮留空。"""
+        first = legs[0] if legs else {}
+        last = legs[-1] if legs else {}
+        passengers = (order.passengers or {}).get("list", [])
+        slots = state.slots.model_dump() if state and state.slots else {}
+        return {
+            "trip_id": order.trip_id,
+            "user_id": user_id,
+            "passengers": [
+                p.get("passenger_id") or p.get("id_no") or p.get("name")
+                for p in passengers
+            ],
+            "context": {
+                "origin": first.get("from_city"),
+                "destination": last.get("to_city"),
+                "purpose": (slots.get("travelStyle") or [None])[0],
+            },
+            "constraints": {
+                k: slots.get(k)
+                for k in (
+                    "origin", "destination", "tripDate", "returnDate", "budget",
+                    "travelStyle", "transportMode", "companion",
+                )
+                if slots.get(k)
+            },
+            "selected_plan": {
+                "mode": first.get("mode"),
+                "vehicle_no": first.get("vehicle_no", ""),
+                "depart": first.get("depart"),
+                "price": order.price,
+                "order_no": order.order_no,
+            },
+            "decision_reason": [],
+            "outcome": {"booking_success": order.status == OrderStatus.PAID.value, "rating": None},
+            "trace_refs": [],
+        }
 
     async def _build_summary_md(self, db, user_id, order, legs) -> str:
         try:
