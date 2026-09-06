@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.crud import profile as profile_crud
 from app.models.database import TripSummaryRow
 from app.models.schemas import TravelSlotBundle, UserProfile
 
@@ -31,6 +32,56 @@ HIGH_IMPACT_CONFIRM_FIELDS = ["origin", "budget", "transportMode"]
 BUDGET_LABEL_BY_TIER = {"economy": "经济型", "comfort": "舒适型", "premium": "高端型"}
 # preferences_v2 transport 值 → 槽位中文标签
 TRANSPORT_LABEL_BY_VALUE = {"train": "高铁", "flight": "飞机", "bus": "大巴"}
+
+
+def _v2_user_prefs(profile: Optional[UserProfile]) -> dict:
+    return ((profile.preferences_v2 or {}) if profile else {}).get("user") or {}
+
+
+def _entry_value(entry, cast=float):
+    try:
+        return cast((entry or {}).get("value"))
+    except (TypeError, ValueError):
+        return None
+
+
+def monitor_context_from_profile(profile: Optional[UserProfile]) -> dict:
+    """Monitor 场景记忆：降价触发比例 + 净节省阈值（未设置返回 None，服务端用默认常量）。"""
+    user_prefs = _v2_user_prefs(profile)
+    ratio = _entry_value(user_prefs.get("price_drop_ratio"))
+    saving = _entry_value(user_prefs.get("saving_threshold_yuan"))
+    return {
+        "priceDropRatio": ratio if (ratio and 0 < ratio < 0.5) else None,
+        "savingThresholdYuan": saving if (saving and saving > 0) else None,
+    }
+
+
+def reminder_context_from_profile(profile: Optional[UserProfile]) -> dict:
+    """Reminder 场景记忆：提前提醒窗口（小时，默认 24，限 1~168）。"""
+    hours = _entry_value(_v2_user_prefs(profile).get("remind_lead_hours"), cast=int)
+    return {"remindLeadHours": hours if hours and 1 <= hours <= 168 else 24}
+
+
+def change_context_from_profile(profile: Optional[UserProfile], passengers: list) -> dict:
+    """Change 场景记忆：容忍变动 + 首个乘客的个性化偏好（时间/交通等）。"""
+    flat = (profile.preferences or {}) if profile else {}
+    passenger_prefs = {}
+    if profile:
+        v2_passengers = (profile.preferences_v2 or {}).get("passengers") or {}
+        for p in passengers or []:
+            pid = p.get("passenger_id") or p.get("id_no") or p.get("name")
+            if not pid:
+                continue
+            entries = v2_passengers.get(str(pid)) or {}
+            passenger_prefs[str(pid)] = {
+                key: (entry or {}).get("value")
+                for key, entry in entries.items()
+            }
+            break  # 本轮只取首个乘客，避免上下文膨胀
+    return {
+        "tolerateChange": bool(flat.get("tolerate_change", True)),
+        "passengerPrefs": passenger_prefs,
+    }
 
 
 @dataclass
@@ -159,3 +210,46 @@ class MemoryContextBuilder:
             "resolved": result.to_dict(),
             "similarEpisodes": similar,
         }
+
+    async def build_for_monitoring(self, db: AsyncSession, user_id: int) -> dict:
+        profile = await profile_crud.get_profile(db, user_id)
+        return monitor_context_from_profile(profile)
+
+    async def build_for_reminder(self, db: AsyncSession, user_id: int) -> dict:
+        profile = await profile_crud.get_profile(db, user_id)
+        return reminder_context_from_profile(profile)
+
+    async def build_for_change(self, db: AsyncSession, user_id: int, order) -> dict:
+        """Change 场景：容忍变动 + 乘客偏好 + 同路线相似历史（仅解释，不参与成本计算）。"""
+        profile = await profile_crud.get_profile(db, user_id)
+        legs = (order.legs or {}).get("legs", []) if order else []
+        passengers = (order.passengers or {}).get("list", []) if order else []
+        origin = legs[0].get("from_city") if legs else None
+        destination = legs[-1].get("to_city") if legs else None
+
+        similar = []
+        if origin and destination:
+            res = await db.execute(
+                select(TripSummaryRow)
+                .where(TripSummaryRow.user_id == user_id)
+                .order_by(TripSummaryRow.created_at.desc())
+                .limit(20)
+            )
+            for r in res.scalars().all():
+                ep = r.episode_json or {}
+                ctx = ep.get("context") or {}
+                if ctx.get("origin") != origin or ctx.get("destination") != destination:
+                    continue
+                plan = ep.get("selected_plan") or {}
+                similar.append({
+                    "mode": plan.get("mode"),
+                    "depart": plan.get("depart"),
+                    "price": plan.get("price"),
+                    "decisionReason": (ep.get("decision_reason") or [])[:1],
+                })
+                if len(similar) >= 2:
+                    break
+
+        context = change_context_from_profile(profile, passengers)
+        context["similarTrips"] = similar
+        return context

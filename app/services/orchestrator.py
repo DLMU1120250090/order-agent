@@ -689,7 +689,8 @@ class TravelOrchestratorService:
 
         profile = await self.memory.get_profile(db, user_id)
         request = ChangeRequest(order_no=order.order_no, scenario=ChangeScenario.USER_CHANGE, target_date=target_date)
-        decision = await self.change_decision.decide(db, request, order, profile)
+        change_ctx = await self.memory_builder.build_for_change(db, user_id, order)
+        decision = await self.change_decision.decide(db, request, order, profile, context=change_ctx)
         ctx.record_event("ORDER_CHANGE_DECISION", "DECISION", request.model_dump(), decision.model_dump())
 
         new_state = state.model_copy(update={
@@ -715,6 +716,7 @@ class TravelOrchestratorService:
             ChangeRequest(order_no=order.order_no, scenario=ChangeScenario.USER_CHANGE, target_date=target_date),
             order,
             profile,
+            context=await self.memory_builder.build_for_change(db, user_id, order),
         )
         task_id = await self.task_service.create(
             db, user_id, TaskType.change.value,
@@ -742,6 +744,7 @@ class TravelOrchestratorService:
             ChangeRequest(order_no=order.order_no, scenario=ChangeScenario.USER_CANCEL),
             order,
             profile,
+            context=await self.memory_builder.build_for_change(db, user_id, order),
         )
         ctx.record_event("ORDER_CHANGE_DECISION", "DECISION", {"scenario": "USER_CANCEL"}, decision.model_dump())
         new_state = state.model_copy(update={

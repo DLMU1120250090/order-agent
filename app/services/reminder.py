@@ -12,6 +12,7 @@ from app.models.schemas import OutboundMessage, TransportLeg
 from app.services.checklist import ChecklistService
 from app.services.collector import DataCollectorService
 from app.services.memory import MemoryService
+from app.services.memory_context import reminder_context_from_profile
 from app.services.push import PushService
 from app.services.task import TaskService
 from app.services.weather_advice import WeatherAdvisoryService
@@ -48,7 +49,9 @@ class ReminderService:
         )
         sent = 0
         for order in res.scalars().all():
-            if not self._departing_within(order, hours=24):
+            profile = await self.memory.get_profile(db, order.user_id)
+            lead_hours = reminder_context_from_profile(profile)["remindLeadHours"]
+            if not self._departing_within(order, hours=lead_hours):
                 continue
             already = await self._reminded(db, order.id)
             if already:

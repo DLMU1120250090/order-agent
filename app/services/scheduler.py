@@ -13,6 +13,7 @@ from app.database import async_session_maker
 from app.models.database import TravelOrderRow, TravelTripRow, UserProfileRow
 from app.models.enums import OrderStatus, TaskStatus, TaskType
 from app.services.memory import MemoryService
+from app.services.memory_context import monitor_context_from_profile
 from app.services.monitor import FlightMonitorService, PriceMonitorService
 from app.services.reminder import ReminderService
 from app.services.task import TaskService
@@ -73,12 +74,19 @@ class SchedulerService:
         async with async_session_maker() as db:
             # 价格监控总开关（preferences.price_monitor，未设置视为开启；按用户缓存避免重复查库）
             enabled_cache: dict = {}
+            monitor_ctx_cache: dict = {}
 
             async def is_enabled(user_id: int) -> bool:
                 if user_id not in enabled_cache:
                     profile = await self.memory.get_profile(db, user_id)
                     enabled_cache[user_id] = price_monitor_enabled(profile.preferences if profile else None)
                 return enabled_cache[user_id]
+
+            async def monitor_ctx_for(user_id: int) -> dict:
+                if user_id not in monitor_ctx_cache:
+                    profile = await self.memory.get_profile(db, user_id)
+                    monitor_ctx_cache[user_id] = monitor_context_from_profile(profile)
+                return monitor_ctx_cache[user_id]
 
             # 阶段1：进行中的行程需求（PLANNING）
             res = await db.execute(select(TravelTripRow).where(TravelTripRow.status == "PLANNING"))
@@ -93,7 +101,7 @@ class SchedulerService:
                     ctx.set_task_id(task_id)
                     try:
                         await self.task_service.start(db, task_id)
-                        hit = await self.price_monitor.scan_phase1(db, trip)
+                        hit = await self.price_monitor.scan_phase1(db, trip, monitor_ctx=await monitor_ctx_for(trip.user_id))
                         if hit:
                             ctx.record_event(EventType.PRICE_DROP_NOTIFIED, "MONITOR", {"trip_id": trip.id}, {"hit": bool(hit)})
                         await self.task_service.succeed(db, task_id, result={"hit": bool(hit)}, notify=False)
@@ -113,7 +121,7 @@ class SchedulerService:
                     ctx.set_task_id(task_id)
                     try:
                         await self.task_service.start(db, task_id)
-                        decision = await self.price_monitor.scan_phase2(db, order)
+                        decision = await self.price_monitor.scan_phase2(db, order, monitor_ctx=await monitor_ctx_for(order.user_id))
                         if decision:
                             ctx.record_event(EventType.PRICE_DROP_NOTIFIED, "MONITOR", {"order_no": order.order_no}, {"hit": bool(decision)})
                         await self.task_service.succeed(db, task_id, result={"hit": bool(decision)}, notify=False)

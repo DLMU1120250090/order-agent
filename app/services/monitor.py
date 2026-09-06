@@ -17,6 +17,16 @@ from app.services.push import PushService
 log = logging.getLogger("travel.monitor")
 
 
+def _drop_exceeds(base_price: float, current_price: float, ratio: float) -> bool:
+    """降价是否超过触发比例（默认 5%）。"""
+    return ratio > 0 and (base_price - current_price) / base_price > ratio
+
+
+def _saving_exceeds(total_loss: float, threshold_yuan: float) -> bool:
+    """净节省是否超过阈值（total_loss 为负表示省钱）。"""
+    return threshold_yuan > 0 and total_loss < -threshold_yuan
+
+
 class PriceMonitorService:
     """
     价格监控（两阶段，默认开启 + feature flag）：
@@ -30,12 +40,14 @@ class PriceMonitorService:
         collector: DataCollectorService,
         change_decision: ChangeDecisionService,
         push: PushService,
+        memory=None,
     ):
         self.collector = collector
         self.change_decision = change_decision
         self.push = push
+        self.memory = memory
 
-    async def scan_phase1(self, db: AsyncSession, trip: TravelTripRow) -> Optional[dict]:
+    async def scan_phase1(self, db: AsyncSession, trip: TravelTripRow, monitor_ctx: Optional[dict] = None) -> Optional[dict]:
         """下单确认前：对比首次查询价（存于 trip 对应方案），下降 >5% 推送。"""
         if not trip.start_date:
             return None
@@ -51,18 +63,19 @@ class PriceMonitorService:
         if not raw:
             return None
         current_min = min(float(r["price"]) for r in raw)
-        if (base_price - current_min) / base_price > 0.05:
+        ratio = ((monitor_ctx or {}).get("priceDropRatio")) or 0.05
+        if _drop_exceeds(base_price, current_min, ratio):
             await self.push.push(
                 trip.user_id,
                 OutboundMessage(
                     kind="TEXT",
-                    text=f"📉 更低价出现：{trip.destination} 当前最低 ¥{current_min:.0f}（原方案 ¥{base_price:.0f}），下降超过 5%，是否按此下单？",
+                    text=f"📉 更低价出现：{trip.destination} 当前最低 ¥{current_min:.0f}（原方案 ¥{base_price:.0f}），下降超过 {ratio * 100:.0f}%，是否按此下单？",
                 ),
             )
             return {"trip_id": trip.id, "base_price": base_price, "current_min": current_min}
         return None
 
-    async def scan_phase2(self, db: AsyncSession, order: TravelOrderRow) -> Optional[ChangeDecision]:
+    async def scan_phase2(self, db: AsyncSession, order: TravelOrderRow, monitor_ctx: Optional[dict] = None) -> Optional[ChangeDecision]:
         """下单后出发前：出发日 ±2 天窗口计算退票重买净节省。"""
         legs = (order.legs or {}).get("legs", [])
         if not legs:
@@ -71,12 +84,13 @@ class PriceMonitorService:
         request = ChangeRequest(order_no=order.order_no, scenario=ChangeScenario.PRICE_DROP, target_date=target_date)
         decision = await self.change_decision.decide(db, request, order)
         rec = decision.recommended
-        if rec and rec.kind.value == "CANCEL_REBOOK" and rec.total_loss < -settings.TRAVEL_PRICE_DROP_THRESHOLD:
+        threshold = ((monitor_ctx or {}).get("savingThresholdYuan")) or settings.TRAVEL_PRICE_DROP_THRESHOLD
+        if rec and rec.kind.value == "CANCEL_REBOOK" and _saving_exceeds(rec.total_loss, threshold):
             await self.push.push(
                 order.user_id,
                 OutboundMessage(
                     kind="CARD",
-                    text=f"📉 退票重买可节省 ¥{-rec.total_loss:.0f}：{decision.reason}。确认后我来执行。",
+                    text=f"📉 退票重买可节省 ¥{-rec.total_loss:.0f}（超过 ¥{threshold:.0f} 阈值）：{decision.reason}。确认后我来执行。",
                     blocks=[o.model_dump() for o in decision.options],
                     correlation_id=order.order_no,
                 ),

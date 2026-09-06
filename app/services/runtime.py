@@ -46,6 +46,6 @@ channel_manager = ChannelManager(orchestrator, push_service)
 # ---- 主动服务（定时任务） ----
 weather_advice = WeatherAdvisoryService()
 reminder = ReminderService(memory, weather_advice, checklist, push_service, task_service, collector)
-price_monitor = PriceMonitorService(collector, change_decision, push_service)
+price_monitor = PriceMonitorService(collector, change_decision, push_service, memory=memory)
 flight_monitor = FlightMonitorService(change_decision, push_service)
 scheduler = SchedulerService(task_service, reminder, price_monitor, flight_monitor, memory)

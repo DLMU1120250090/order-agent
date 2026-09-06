@@ -37,6 +37,7 @@ class ChangeDecisionService:
         request: ChangeRequest,
         order: TravelOrderRow,
         profile: Optional[UserProfile] = None,
+        context: Optional[dict] = None,
     ) -> ChangeDecision:
         now = datetime.now()
         legs = (order.legs or {}).get("legs", [])
@@ -129,6 +130,23 @@ class ChangeDecisionService:
             recommended = min(options, key=lambda o: o.total_loss)
 
         reason = self._build_reason(recommended, order.price)
+        # Commit 8：相关历史只作解释参考，不参与成本最优选择
+        similar = (context or {}).get("similarTrips") or []
+        if similar:
+            s = similar[0]
+            mode_label = {
+                "FLIGHT": "飞机", "TRAIN": "火车", "BUS": "大巴",
+            }.get(s.get("mode"), s.get("mode") or "行程")
+            bits = []
+            if s.get("depart"):
+                bits.append(f"{s.get('depart')}出发")
+            if s.get("price") is not None:
+                try:
+                    bits.append(f"¥{float(s.get('price')):.0f}")
+                except (TypeError, ValueError):
+                    pass
+            desc = f"{mode_label}" + (f" {', '.join(bits)}" if bits else "")
+            reason = f"{reason}（参考你上次同路线{desc}的经历，仅作参考）"
         return ChangeDecision(request=request, options=options, recommended=recommended, reason=reason)
 
     def _score(self, opt: ChangeOption, profile: Optional[UserProfile]) -> float:
