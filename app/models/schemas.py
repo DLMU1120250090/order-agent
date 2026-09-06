@@ -297,6 +297,14 @@ class FeedbackRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class PostTripFeedbackRequest(BaseModel):
+    """出行后评分（Commit 5，R2）：1~5 星落到对应订单 Episode 的 outcome。"""
+    sessionId: str
+    orderNo: str
+    rating: int = Field(..., ge=1, le=5, description="1-5 星")
+    reason: Optional[str] = None
+
+
 class EvaluationRequest(BaseModel):
     """评估任务运行请求体"""
     startAt: datetime

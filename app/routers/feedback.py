@@ -4,10 +4,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.database import FeedbackRow, RequestTraceRow
-from app.models.schemas import FeedbackRequest
+from app.models.schemas import FeedbackRequest, PostTripFeedbackRequest
+from app.services.episode_feedback import apply_post_trip
 from app.services.runtime import memory
 
 router = APIRouter(prefix="/api/v1/travel/feedback", tags=["travel-feedback"])
+
+
+@router.post("/post-trip")
+async def post_trip_rating(
+    request: PostTripFeedbackRequest,
+    x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+):
+    """出行后评分（Commit 5，R2）：1~5 星落到对应订单 Episode 的 outcome。"""
+    if not request.orderNo or not request.orderNo.strip():
+        raise HTTPException(status_code=400, detail="orderNo 不能为空")
+    row = await apply_post_trip(
+        db, user_id=x_user_id, order_no=request.orderNo,
+        session_id=request.sessionId, rating=request.rating, reason=request.reason,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="未找到该订单对应的行程记录")
+    return {"status": "success", "episodeId": row.id, "rating": request.rating}
 
 
 @router.post("")

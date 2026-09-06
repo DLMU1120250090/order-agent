@@ -10,7 +10,7 @@
 - 订单与支付：幂等防重复下单，Playwright 自动化收银台 → 二维码即推，三层支付检测，全程人机确认、绝不代付
 - 改签退票：可解释成本模型自动推荐损失最小方案，改签/退票/降价/航变四场景复用
 - 主动服务：后台任务状态机 + 定时调度，价格监控、航变监控、出发前提醒，Web/钉钉/微信多通道推送
-- 记忆驱动决策：L1 画像 / L2 结构化行程 Episode / L3 蒸馏偏好；记忆补全缺失字段需用户显式确认，相似历史进入推荐解释，降价/改签/提醒按用户偏好调节，业务规则始终把关
+- 记忆驱动决策：User/Passenger 分主体（本人固定 passenger_id=0、role 只分 self/others）；多乘客下单前先确认"给谁买"；L1 画像 / L2 结构化行程与 User 行为事件 / L3 按乘客蒸馏偏好；记忆补全缺失字段需用户显式确认，相似历史进入推荐解释，降价/改签/提醒按用户偏好调节，业务规则始终把关
 - 可观测与评估：全链路 Trace（含后台任务的 run/task 关联与订单状态链）落库可查；离线 Replay dry-run 回放 + Failure Taxonomy 失败分类；规则 60% + 模型评审 10% + 用户反馈 30% 按业务链路聚合评估
 
 ## 技术栈
@@ -61,6 +61,7 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
 - `POST /api/v1/travel/debug/replay`：单条 Trace 规则层 dry-run 重放，返回 before/after 字段级 diff（不调 LLM、不落业务数据）
 - `POST /api/v1/travel/debug/replay/cases`：按失败主题（recovery / recommendation_reject）收集回归 case 集
 - `POST /api/v1/travel/evaluations`：时间范围评估，返回业务链路级指标（linkResults / totalLinks）与失败分类分布（failureDistribution）
+- `POST /api/v1/travel/feedback/post-trip`：出行后评分（1~5 星），落到对应订单 Episode 的 outcome
 
 ## 说明
 
