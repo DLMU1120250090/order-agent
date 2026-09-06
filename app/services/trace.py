@@ -211,9 +211,6 @@ class TraceContext:
             total_tokens = token_usage.get("total_tokens")
 
         error_msg = f"{error.__class__.__name__}: {str(error)}" if error else None
-        if error:
-            self.status = "FAILED"
-            self.error_message = error_msg
 
         self.record(
             event_type=EventType.AGENT_CALL,

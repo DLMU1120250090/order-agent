@@ -338,7 +338,7 @@ class EvaluationService:
         request_failed = any(e.get("eventType") == EventType.REQUEST_FAILED for e in events)
         if task_failed:
             types.append("Tool")
-        elif request_failed or row.status == "FAILED":
+        elif request_failed:
             types.append("Recovery")
         return [name for name in FAILURE_TAXONOMY if name in set(types)]
 

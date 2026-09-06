@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 from app.services.replay import _extract_case, diff_maps
+from app.services.replay import llm_golden_of
 
 
 def _payload(obj: dict) -> str:
@@ -76,3 +77,24 @@ def test_diff_maps_identical_and_changes():
     changed = diff_maps(before, after)
     assert changed["identical"] is False
     assert any(c["path"] == "top.price" and c["before"] == 100 and c["after"] == 90 for c in changed["changes"])
+
+
+def test_llm_golden_extraction():
+    events = [
+        {
+            "eventType": "AGENT_CALL",
+            "outputPayload": _payload({"intent": "PLAN_RECOMMENDATION"}),
+        },
+        {
+            "eventType": "INTENT_REVISED",
+            "outputPayload": _payload({"intent": "ORDER_QUERY", "slots": {}}),
+        },
+        {
+            "eventType": "RESPONSE_READY",
+            "outputPayload": _payload({"speechText": "这是回复"}),
+        },
+    ]
+    golden = llm_golden_of(_fake_row(events))
+    assert golden["goldenIntent"] == "ORDER_QUERY"
+    assert golden["agentOutputs"]
+    assert golden["finalReply"] == "这是回复"

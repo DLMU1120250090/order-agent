@@ -37,6 +37,17 @@ def test_classify_tool_and_recovery():
     assert "Recovery" in svc._classify_failures(metrics, {}, [], _row(status="FAILED", events=[{"eventType": EventType.REQUEST_FAILED}]))
 
 
+def test_recovered_agent_error_is_not_recovery():
+    """Commit 10：Agent 调用报错但已兜底恢复（INTENT_FALLBACK + REQUEST_FINISHED）不应算请求失败。"""
+    events = [
+        {"eventType": EventType.AGENT_CALL, "errorMessage": "APIConnectionError"},
+        {"eventType": "INTENT_FALLBACK"},
+        {"eventType": EventType.REQUEST_FINISHED},
+    ]
+    types = svc._classify_failures({}, {}, [], _row(status="FAILED", events=events))
+    assert "Recovery" not in types
+
+
 def test_classify_policy_and_clean():
     metrics = {}
     assert "Policy" in svc._classify_failures(metrics, {"safetyCompliance": False}, [], _row())

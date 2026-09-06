@@ -67,6 +67,39 @@ def _output_of(events: list, event_type: str) -> Optional[dict]:
     return None
 
 
+def _parse_payload(value) -> Optional[dict]:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:  # noqa: BLE001
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def llm_golden_of(row: RequestTraceRow) -> dict:
+    """LLM golden（Commit 10）：默认不重跑，取 trace 内记录的当时 LLM/Agent 输出。"""
+    events = _events_of(row)
+    golden_intent = None
+    agent_outputs = []
+    final_reply = ""
+    for e in events:
+        event_type = e.get("eventType")
+        out = _parse_payload(e.get("outputPayload")) or {}
+        if event_type == "INTENT_REVISED" and out.get("intent"):
+            golden_intent = out["intent"]
+        elif event_type == "AGENT_CALL":
+            text = e.get("outputPayload") or e.get("errorMessage") or ""
+            if text:
+                agent_outputs.append(str(text)[:300])
+        elif event_type == "RESPONSE_READY" and out.get("speechText"):
+            final_reply = str(out["speechText"])[:200]
+    return {
+        "goldenIntent": golden_intent,
+        "agentOutputs": agent_outputs[:2],
+        "finalReply": final_reply,
+    }
+
+
 def _extract_case(row: RequestTraceRow) -> dict:
     """从一条 Trace 提取重放 case（原始结果摘要，供 before 对比）。"""
     events = _events_of(row)
@@ -239,3 +272,45 @@ class ReplayService:
             "diff": diffs,
             "note": "规则层重放不调用 LLM；外部数据命中 data_cache；planner 为 dry-run 不落库。",
         }
+
+    async def collect_cases(self, db: AsyncSession, user_id: int, topic: str = "recovery", limit: int = 10) -> dict:
+        """按失败主题收集回归 case 集（Commit 10）：recovery / recommendation_reject / failed。"""
+        safe_limit = max(1, min(200, limit or 10))
+        trace_ids = None
+        if topic == "recommendation_reject":
+            from app.models.database import FeedbackRow
+
+            fb_res = await db.execute(
+                select(FeedbackRow.trace_id)
+                .where(
+                    FeedbackRow.user_id == user_id,
+                    FeedbackRow.trace_id.is_not(None),
+                    FeedbackRow.action.in_(["DISLIKE", "REJECT", "SWITCH", "REFRESH"]),
+                )
+                .order_by(FeedbackRow.id.desc())
+                .limit(safe_limit)
+            )
+            trace_ids = [str(t) for t in fb_res.scalars().all() if t]
+            if not trace_ids:
+                return {"topic": topic, "total": 0, "cases": []}
+
+        query = select(RequestTraceRow).where(RequestTraceRow.user_id == user_id)
+        if topic == "recovery":
+            query = query.where(RequestTraceRow.status == "FAILED")
+        if trace_ids:
+            query = query.where(RequestTraceRow.trace_id.in_(trace_ids))
+        query = query.order_by(RequestTraceRow.id.desc()).limit(safe_limit)
+        rows = list((await db.execute(query)).scalars().all())
+
+        cases = []
+        for row in rows:
+            case = _extract_case(row)
+            replay = await self.replay_trace(db, row.trace_id, user_id)
+            cases.append({
+                "traceId": row.trace_id,
+                "createdAt": row.created_at.isoformat() if row.created_at else None,
+                "intent": case.get("intent"),
+                "golden": llm_golden_of(row),
+                "replay": replay,
+            })
+        return {"topic": topic, "total": len(cases), "cases": cases}

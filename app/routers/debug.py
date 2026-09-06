@@ -39,6 +39,22 @@ async def replay_trace(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.post("/api/v1/travel/debug/replay/cases")
+async def replay_case_collection(
+    request: Request,
+    x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+):
+    """按失败主题收集回归 case 集（Commit 10，供 before/after 实验）。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    topic = (body.get("topic") or "recovery").strip()
+    limit = int(body.get("limit") or 10)
+    return await replay_service.collect_cases(db, x_user_id, topic=topic, limit=limit)
+
+
 @router.post("/api/v1/travel/debug/run-scheduler")
 async def debug_run_scheduler(request: Request):
     """手动触发主动推送扫描：departure_reminder / price_watch / flight_monitor。"""
