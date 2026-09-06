@@ -11,6 +11,7 @@ from app.database import async_session_maker
 from app.models.enums import TaskStatus, PaymentPending
 from app.models.schemas import OutboundMessage, TaskOut
 from app.services.push import PushService
+from app.services.trace import TraceScope, active_trace_ctx
 
 log = logging.getLogger("travel.task")
 
@@ -25,6 +26,13 @@ class TaskService:
 
     def __init__(self, push_service: PushService):
         self.push_service = push_service
+
+    @staticmethod
+    def _record(event_type: str, phase: str, payload: dict):
+        """若当前协程存在 Trace 上下文，则记录一条任务生命周期事件（Commit 4）。"""
+        ctx = active_trace_ctx.get()
+        if ctx:
+            ctx.record_event(event_type, phase, payload or {}, {})
 
     async def create(
         self,
@@ -47,10 +55,14 @@ class TaskService:
             session_id=session_id,
             order_id=order_id,
         )
+        self._record("TASK_CREATED", "TASK", {
+            "taskId": task_id, "type": task_type, "channel": channel, "sessionId": session_id,
+        })
         return task_id
 
     async def start(self, db: AsyncSession, task_id: str):
         await task_crud.update_task(db, task_id, status=TaskStatus.RUNNING.value, progress=0)
+        self._record("TASK_STARTED", "TASK", {"taskId": task_id})
 
     async def update_progress(
         self,
@@ -65,6 +77,7 @@ class TaskService:
             fields["status"] = status
         row = await task_crud.update_task(db, task_id, **fields)
         if row:
+            self._record("TASK_PROGRESS", "TASK", {"taskId": task_id, "progress": row.progress, "status": row.status})
             await self.push_service.push(
                 row.user_id,
                 OutboundMessage(
@@ -85,6 +98,7 @@ class TaskService:
             progress=80,
         )
         if row:
+            self._record("TASK_WAITING_USER", "TASK", {"taskId": task_id, "pending": pending, "text": text[:200]})
             await self.push_service.push(
                 row.user_id,
                 OutboundMessage(
@@ -101,6 +115,7 @@ class TaskService:
             db, task_id, status=TaskStatus.SUCCEEDED.value, progress=100, result=result
         )
         if row and notify:
+            self._record("TASK_SUCCEEDED", "TASK", {"taskId": task_id})
             await self.push_service.push(
                 row.user_id,
                 OutboundMessage(
@@ -128,6 +143,7 @@ class TaskService:
             fields["retry_count"] = (row_before.retry_count if row_before else 0) + 1
             fields["next_run_at"] = next_run_at or (datetime.utcnow() + timedelta(minutes=1))
         row = await task_crud.update_task(db, task_id, **fields)
+        self._record("TASK_FAILED", "TASK", {"taskId": task_id, "error": str(error)[:300], "status": fields.get("status")})
         if row and notify:
             await self.push_service.push(
                 row.user_id,
@@ -142,6 +158,7 @@ class TaskService:
 
     async def cancel(self, db: AsyncSession, task_id: str):
         await task_crud.update_task(db, task_id, status=TaskStatus.CANCELLED.value)
+        self._record("TASK_CANCELLED", "TASK", {"taskId": task_id})
 
     async def get(self, db: AsyncSession, task_id: str) -> Optional[TaskOut]:
         row = await task_crud.get_task(db, task_id)
@@ -160,15 +177,24 @@ class TaskService:
         """
         后台执行包装：独立 DB 会话，start → await → succeed/fail。
         供 asyncio.create_task(task_service.run(task_id, coro)) 调用。
+
+        Commit 4：内部自建 TraceScope（run_id=task_id），覆盖从请求协程继承的 ctx，
+        让后台执行阶段的 TASK_*/ORDER_STATUS_CHANGED 事件落到独立 trace，可按 task_id 关联。
         """
         async with async_session_maker() as db:
-            await self.start(db, task_id)
-            try:
-                result = await coro(db)
-                # 等待用户操作（支付/手动/确认）的任务保持 WAITING_USER，由业务方确认后置为 SUCCEEDED
-                if isinstance(result, dict) and result.get("waiting"):
-                    return
-                await self.succeed(db, task_id, result=result)
-            except Exception as e:  # noqa: BLE001
-                log.exception("后台任务失败 task_id=%s", task_id)
-                await self.fail(db, task_id, str(e), retryable=False)
+            task_row = await task_crud.get_task(db, task_id)
+            if not task_row:
+                return
+            async with TraceScope(
+                db, task_row.session_id, task_row.user_id, run_id=task_id, task_id=task_id
+            ):
+                await self.start(db, task_id)
+                try:
+                    result = await coro(db)
+                    # 等待用户操作（支付/手动/确认）的任务保持 WAITING_USER，由业务方确认后置为 SUCCEEDED
+                    if isinstance(result, dict) and result.get("waiting"):
+                        return
+                    await self.succeed(db, task_id, result=result)
+                except Exception as e:  # noqa: BLE001
+                    log.exception("后台任务失败 task_id=%s", task_id)
+                    await self.fail(db, task_id, str(e), retryable=False)

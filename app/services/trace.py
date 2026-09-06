@@ -211,13 +211,27 @@ class TraceScope:
         ctx.record_event(...)
         # 退出 async with 时会自动计算耗时并完成数据库保存
     """
-    def __init__(self, db: AsyncSession, session_id: str, user_id: int):
+    def __init__(
+        self,
+        db: AsyncSession,
+        session_id: Optional[str],
+        user_id: Optional[int],
+        run_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ):
         self.db = db
-        self.session_id = session_id
-        self.user_id = user_id
+        # Commit 4：后台任务/调度器无会话时允许空值；保存时用空串/0 占位（表列非空）
+        self.session_id = session_id or ""
+        self.user_id = user_id or 0
+        self.run_id = run_id
+        self.task_id = task_id
         self.trace_id = f"trace_{uuid.uuid4().hex}"
         self.context = TraceContext(self.trace_id, self.session_id, self.user_id)
         self.token = None
+
+    def set_task_id(self, task_id: Optional[str]):
+        """任务创建后回填 task_id（scheduler 先建 scope 再建 task 的场景）。"""
+        self.task_id = task_id
 
     async def __aenter__(self) -> TraceContext:
         # 将当前请求的 TraceContext 塞入协程变量中，并保留还原 Token
@@ -239,6 +253,8 @@ class TraceScope:
             "traceId": self.trace_id,
             "sessionId": self.session_id,
             "userId": self.user_id,
+            "runId": self.run_id,
+            "taskId": self.task_id,
             "status": self.context.status,
             "durationMs": duration_ms,
             "events": [e.to_dict() for e in self.context.events]
@@ -253,6 +269,8 @@ class TraceScope:
             event_count=len(self.context.events),
             duration_ms=duration_ms,
             error_message=self.context.error_message,
+            run_id=self.run_id,
+            task_id=self.task_id,
             trace_json=trace_json,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()

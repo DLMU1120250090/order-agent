@@ -16,6 +16,7 @@ from app.services.memory import MemoryService
 from app.services.monitor import FlightMonitorService, PriceMonitorService
 from app.services.reminder import ReminderService
 from app.services.task import TaskService
+from app.services.trace import TraceScope
 
 log = logging.getLogger("travel.scheduler")
 
@@ -83,65 +84,76 @@ class SchedulerService:
             for trip in res.scalars().all():
                 if not await is_enabled(trip.user_id):
                     continue
-                task_id = await self.task_service.create(
-                    db, trip.user_id, TaskType.price_watch.value,
-                    {"trip_id": trip.id, "phase": 1}, channel="web",
-                )
-                try:
-                    await self.task_service.start(db, task_id)
-                    hit = await self.price_monitor.scan_phase1(db, trip)
-                    await self.task_service.succeed(db, task_id, result={"hit": bool(hit)}, notify=False)
-                except Exception as e:  # noqa: BLE001
-                    await self.task_service.fail(db, task_id, str(e), retryable=True)
+                async with TraceScope(db, "", trip.user_id, run_id=f"price_watch:trip:{trip.id}") as ctx:
+                    task_id = await self.task_service.create(
+                        db, trip.user_id, TaskType.price_watch.value,
+                        {"trip_id": trip.id, "phase": 1}, channel="web",
+                    )
+                    ctx.set_task_id(task_id)
+                    try:
+                        await self.task_service.start(db, task_id)
+                        hit = await self.price_monitor.scan_phase1(db, trip)
+                        await self.task_service.succeed(db, task_id, result={"hit": bool(hit)}, notify=False)
+                    except Exception as e:  # noqa: BLE001
+                        await self.task_service.fail(db, task_id, str(e), retryable=True)
 
             # 阶段2：已出票订单在出发窗口内
             res2 = await db.execute(select(TravelOrderRow).where(TravelOrderRow.status == OrderStatus.PAID.value))
             for order in res2.scalars().all():
                 if not await is_enabled(order.user_id):
                     continue
-                task_id = await self.task_service.create(
-                    db, order.user_id, TaskType.price_watch.value,
-                    {"order_no": order.order_no, "phase": 2}, channel=order.channel, order_id=order.id,
-                )
-                try:
-                    await self.task_service.start(db, task_id)
-                    decision = await self.price_monitor.scan_phase2(db, order)
-                    await self.task_service.succeed(db, task_id, result={"hit": bool(decision)}, notify=False)
-                except Exception as e:  # noqa: BLE001
-                    await self.task_service.fail(db, task_id, str(e), retryable=True)
+                async with TraceScope(db, "", order.user_id, run_id=f"price_watch:order:{order.id}") as ctx:
+                    task_id = await self.task_service.create(
+                        db, order.user_id, TaskType.price_watch.value,
+                        {"order_no": order.order_no, "phase": 2}, channel=order.channel, order_id=order.id,
+                    )
+                    ctx.set_task_id(task_id)
+                    try:
+                        await self.task_service.start(db, task_id)
+                        decision = await self.price_monitor.scan_phase2(db, order)
+                        await self.task_service.succeed(db, task_id, result={"hit": bool(decision)}, notify=False)
+                    except Exception as e:  # noqa: BLE001
+                        await self.task_service.fail(db, task_id, str(e), retryable=True)
 
     async def _flight_monitor(self):
         async with async_session_maker() as db:
             res = await db.execute(select(TravelOrderRow).where(TravelOrderRow.status == OrderStatus.PAID.value))
             for order in res.scalars().all():
-                task_id = await self.task_service.create(
-                    db, order.user_id, TaskType.flight_monitor.value,
-                    {"order_no": order.order_no}, channel=order.channel, order_id=order.id,
-                )
-                try:
-                    await self.task_service.start(db, task_id)
-                    decision = await self.flight_monitor.scan(db, order)
-                    await self.task_service.succeed(db, task_id, result={"hit": bool(decision)}, notify=False)
-                except Exception as e:  # noqa: BLE001
-                    await self.task_service.fail(db, task_id, str(e), retryable=True)
+                async with TraceScope(db, "", order.user_id, run_id=f"flight_monitor:order:{order.id}") as ctx:
+                    task_id = await self.task_service.create(
+                        db, order.user_id, TaskType.flight_monitor.value,
+                        {"order_no": order.order_no}, channel=order.channel, order_id=order.id,
+                    )
+                    ctx.set_task_id(task_id)
+                    try:
+                        await self.task_service.start(db, task_id)
+                        decision = await self.flight_monitor.scan(db, order)
+                        await self.task_service.succeed(db, task_id, result={"hit": bool(decision)}, notify=False)
+                    except Exception as e:  # noqa: BLE001
+                        await self.task_service.fail(db, task_id, str(e), retryable=True)
 
     async def _departure_reminder(self):
         async with async_session_maker() as db:
-            try:
-                sent = await self.reminder.scan_due_orders(db)
-                if sent:
-                    log.info("出发提醒已推送 %s 个订单", sent)
-            except Exception as e:  # noqa: BLE001
-                log.warning("出发提醒扫描失败: %s", e)
+            async with TraceScope(db, "", 0, run_id="departure_reminder"):
+                try:
+                    sent = await self.reminder.scan_due_orders(db)
+                    if sent:
+                        log.info("出发提醒已推送 %s 个订单", sent)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("出发提醒扫描失败: %s", e)
 
     async def _memory_distill(self):
         async with async_session_maker() as db:
             res = await db.execute(select(UserProfileRow))
             for row in res.scalars().all():
-                try:
-                    await self.memory.distill(db, row.user_id)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("记忆蒸馏失败 user=%s: %s", row.user_id, e)
+                async with TraceScope(db, "", row.user_id, run_id=f"memory_distill:{row.user_id}") as ctx:
+                    try:
+                        ctx.record_event("MEMORY_DISTILL_STARTED", "MEMORY", {"userId": row.user_id}, {})
+                        await self.memory.distill(db, row.user_id)
+                        ctx.record_event("MEMORY_DISTILL_SUCCEEDED", "MEMORY", {"userId": row.user_id}, {})
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("记忆蒸馏失败 user=%s: %s", row.user_id, e)
+                        ctx.record_event("MEMORY_DISTILL_FAILED", "MEMORY", {"userId": row.user_id}, {"error": str(e)[:300]})
 
     async def _retry_worker(self):
         """拉起到期 RETRYING 任务（资金类不自动重试；重试次数超限标记失败）。"""

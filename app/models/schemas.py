@@ -343,6 +343,8 @@ class TraceRowOut(BaseModel):
     eventCount: int
     durationMs: Optional[int] = None
     errorMessage: Optional[str] = None
+    runId: Optional[str] = None
+    taskId: Optional[str] = None
     traceJson: Any
     createdAt: datetime
     updatedAt: datetime

@@ -518,12 +518,14 @@ class TravelOrchestratorService:
                     if layer1 or layer2:
                         layer = 1 if layer1 else 2
                         log.info("三层支付检测命中 layer=%s order=%s", layer, order.order_no)
-                        target = cur or order
-                        updated = await self.booking.confirm_payment(
-                            db, target.task_id, target, push_success=True,
-                        )
-                        await self._finalize_payment(db, user_id, updated, state)
-                        await browser_order.close(order.order_no)
+                        async with TraceScope(db, state.sessionId, user_id, run_id=f"payment_monitor:{order.order_no}") as ctx:
+                            ctx.record_event("PAYMENT_DETECTED", "PAYMENT", {"orderNo": order.order_no}, {"layer": layer})
+                            target = cur or order
+                            updated = await self.booking.confirm_payment(
+                                db, target.task_id, target, push_success=True,
+                            )
+                            await self._finalize_payment(db, user_id, updated, state, ctx)
+                            await browser_order.close(order.order_no)
                         return
             except Exception as e:  # noqa: BLE001
                 log.warning("支付监控异常 order=%s: %s", order.order_no, e)

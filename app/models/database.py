@@ -43,6 +43,9 @@ class RequestTraceRow(SQLModel, table=True):
     event_count: int = Field(default=0)
     duration_ms: Optional[int] = None
     error_message: Optional[str] = None
+    # Commit 4：跨请求链路关联（后台任务/调度器场景 run_id=task_id）
+    run_id: Optional[str] = Field(default=None, max_length=64)
+    task_id: Optional[str] = Field(default=None, max_length=64)
     trace_json: Dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

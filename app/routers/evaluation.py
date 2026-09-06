@@ -29,6 +29,8 @@ def to_trace_row_out(row: RequestTraceRow) -> TraceRowOut:
         eventCount=row.event_count,
         durationMs=row.duration_ms,
         errorMessage=row.error_message,
+        runId=row.run_id,
+        taskId=row.task_id,
         traceJson=row.trace_json,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
@@ -90,6 +92,8 @@ async def find_by_time_range(
     startAt: datetime = Query(...),
     endAt: datetime = Query(...),
     onlyUnlabeled: Optional[bool] = Query(default=False),
+    taskId: Optional[str] = Query(default=None),
+    runId: Optional[str] = Query(default=None),
     limit: Optional[int] = Query(default=200),
     x_user_id: int = Header(default=1, alias="X-User-Id"),
     db: AsyncSession = Depends(get_db),
@@ -108,6 +112,10 @@ async def find_by_time_range(
             RequestTraceRow.expected_slots == None,  # noqa: E711
             RequestTraceRow.expected_clarify_action == None,  # noqa: E711
         )
+    if taskId:
+        query = query.where(RequestTraceRow.task_id == taskId)
+    if runId:
+        query = query.where(RequestTraceRow.run_id == runId)
     result = await db.execute(query.order_by(desc(RequestTraceRow.created_at)).limit(safe_limit))
     return [to_trace_row_out(r) for r in result.scalars().all()]
 
