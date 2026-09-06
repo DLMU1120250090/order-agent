@@ -12,13 +12,17 @@ class ChecklistAgent:
         self.model = get_light_model()
         self.prompt_template = ChatPromptTemplate.from_messages([
             SystemMessage(content=self.system_prompt),
-            ("user", "行程段：{legs}\n目的地：{destination}\n天气：{weather}")
+            ("user", (
+                "行程段：{legs}\n目的地：{destination}\n天气：{weather}\n"
+                "技能规则（如有，请遵守；没有则忽略）：{skill_context}"
+            ))
         ])
         self.chain = self.prompt_template | self.model | StrOutputParser()
 
-    async def call(self, legs: str, destination: str, weather: str) -> str:
+    async def call(self, legs: str, destination: str, weather: str, skill_context: str = "") -> str:
         return await self.chain.ainvoke({
             "legs": legs,
             "destination": destination,
-            "weather": weather
+            "weather": weather,
+            "skill_context": skill_context or "（无）",
         })

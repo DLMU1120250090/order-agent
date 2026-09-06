@@ -14,6 +14,7 @@ from app.services.collector import DataCollectorService
 from app.services.memory import MemoryService
 from app.services.memory_context import reminder_context_from_profile
 from app.services.push import PushService
+from app.services.skill_loader import load_skill
 from app.services.task import TaskService
 from app.services.weather_advice import WeatherAdvisoryService
 
@@ -78,7 +79,7 @@ class ReminderService:
         advice = await self.weather_advice.build_advisory(
             db, origin, destination, depart_hour=8, commute_minutes=60, weather=weather
         )
-        checklist_md = await self.checklist.generate(db, legs, destination, weather)
+        checklist_md = await self.checklist.generate(db, legs, destination, weather, skill_context=load_skill("travel-checklist"))
         # L1 证件检查：有效期需覆盖出行日期，临近 30 天提醒
         profile = await self.memory.get_profile(db, order.user_id)
         id_check = self._id_check(order, profile)

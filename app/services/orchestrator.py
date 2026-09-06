@@ -36,6 +36,7 @@ from app.services.mock_supplier import mock_supplier
 from app.services.planner import ItineraryPlanner
 from app.services.push import PushService
 from app.services.risk_guard import RiskGuardService
+from app.services.skill_loader import load_skill
 from app.services.task import TaskService
 from app.services.trace import TraceContext, TraceScope, active_trace_ctx, traced_agent_call
 from app.services.trace_schema import EventType
@@ -796,7 +797,7 @@ class TravelOrchestratorService:
             if legs:
                 destination = legs[-1].to_city
         weather = await self.collector.hourly_weather(db, 30.0, 110.0, hours=12)
-        md = await self.checklist.generate(db, legs, destination, weather)
+        md = await self.checklist.generate(db, legs, destination, weather, skill_context=load_skill("travel-checklist"))
         ctx.record_event("CHECKLIST_GENERATED", "CHECKLIST", {"destination": destination}, {"legs": len(legs)})
         msg = OutboundMessage(channel=state.channel.value, text=md, kind="CARD")
         return self._finish(db, state, ctx, msg)

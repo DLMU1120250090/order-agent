@@ -21,12 +21,14 @@ class ChecklistService:
         legs: List[TransportLeg],
         destination: str,
         weather: Optional[List[HourlyWeather]] = None,
+        skill_context: str = "",
     ) -> str:
         try:
             return await self.agent.call(
                 legs=json.dumps([l.model_dump() for l in legs], ensure_ascii=False),
                 destination=destination,
                 weather=json.dumps([w.model_dump() for w in weather or []], ensure_ascii=False),
+                skill_context=skill_context,
             )
         except Exception:  # noqa: BLE001
             return self._template(legs, destination)
