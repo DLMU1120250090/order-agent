@@ -320,10 +320,12 @@ class EvaluationReport(BaseModel):
     startAt: datetime
     endAt: datetime
     totalTraces: int
+    totalLinks: Optional[int] = 0  # Commit 6：业务链路数（run/task/session 聚合）
     labeledTraces: int
     avgScore: Optional[float] = None
     metricAverages: Dict[str, Optional[float]]
     traceResults: List[TraceEvaluationResult]
+    linkResults: List[TraceEvaluationResult] = Field(default_factory=list)  # Commit 6：链路级评估
 
 
 class TraceLabelRequest(BaseModel):

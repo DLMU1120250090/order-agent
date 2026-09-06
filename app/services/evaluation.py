@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime
+from types import SimpleNamespace
 from typing import List, Dict, Optional, Any
 
 from sqlalchemy import select
@@ -8,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.agents.evaluation import EvaluationJudgeAgent
-from app.models.database import FeedbackRow, RequestTraceRow
+from app.models.database import FeedbackRow, RequestTraceRow, TravelOrderRow
+from app.models.enums import OrderStatus
 from app.models.schemas import EvaluationReport, EvaluationRequest, TraceEvaluationResult
 from app.services.trace_schema import EventType, TraceEventSchema
 
@@ -55,10 +57,12 @@ class EvaluationService:
                 startAt=request.startAt,
                 endAt=request.endAt,
                 totalTraces=0,
+                totalLinks=0,
                 labeledTraces=0,
                 avgScore=None,
                 metricAverages={},
                 traceResults=[],
+                linkResults=[],
             )
 
         session_ids = list({t.session_id for t in traces if t.session_id})
@@ -80,12 +84,35 @@ class EvaluationService:
             res = await self._evaluate_single_trace(t, feedbacks_dict.get(t.session_id, []), request.includeLlmJudge)
             trace_results.append(res)
 
+        # ---- Commit 6：链路聚合（run_id/task_id 优先，其次 session_id；孤立 trace 自成一链）----
+        groups: Dict[str, List[RequestTraceRow]] = {}
+        for t in traces:
+            groups.setdefault(self._link_key(t), []).append(t)
+
+        link_results = []
+        for rows in groups.values():
+            rows_sorted = sorted(rows, key=lambda r: r.created_at)
+            merged = self._merge_trace_rows(rows_sorted)
+            link_feedbacks = []
+            seen_fb = set()
+            for sid in {r.session_id for r in rows_sorted if r.session_id}:
+                for fb in feedbacks_dict.get(sid, []):
+                    if id(fb) not in seen_fb:
+                        seen_fb.add(id(fb))
+                        link_feedbacks.append(fb)
+            ground_truth = await self._order_ground_truth(db, user_id, merged)
+            link_results.append(await self._evaluate_single_trace(
+                merged, link_feedbacks, request.includeLlmJudge, ground_truth=ground_truth,
+            ))
+
         total_traces = len(traces)
+        total_links = len(groups)
         labeled_traces = sum(1 for t in traces if t.expected_intent or t.expected_slots or t.expected_clarify_action)
-        avg_score = self._average([tr.score for tr in trace_results])
+        primary = link_results or trace_results
+        avg_score = self._average([tr.score for tr in primary])
 
         metrics_lists: Dict[str, List[float]] = {}
-        for tr in trace_results:
+        for tr in primary:
             for name, val in tr.metrics.items():
                 if val is not None:
                     metrics_lists.setdefault(name, []).append(val)
@@ -95,17 +122,68 @@ class EvaluationService:
             startAt=request.startAt,
             endAt=request.endAt,
             totalTraces=total_traces,
+            totalLinks=total_links,
             labeledTraces=labeled_traces,
             avgScore=avg_score,
             metricAverages=metric_averages,
             traceResults=trace_results,
+            linkResults=link_results,
         )
+
+    @staticmethod
+    def _link_key(row: RequestTraceRow) -> str:
+        """业务链路键：run_id / task_id 优先，其次 session_id；都没有时按 trace 自身。"""
+        return row.run_id or row.task_id or (row.session_id or f"trace:{row.trace_id}")
+
+    @staticmethod
+    def _merge_trace_rows(rows: List[RequestTraceRow]) -> SimpleNamespace:
+        """把同一链路的多条 Trace 事件合并为一条虚拟 Trace（结果类指标按链路计算）。"""
+        events = []
+        for r in rows:
+            raw = r.trace_json
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    raw = {}
+            events.extend((raw or {}).get("events") or [])
+        first = rows[0]
+        return SimpleNamespace(
+            trace_id=f"link_{first.run_id or first.task_id or first.session_id or first.trace_id}",
+            session_id=first.session_id,
+            user_id=first.user_id,
+            status="FAILED" if any(r.status == "FAILED" for r in rows) else "SUCCESS",
+            duration_ms=sum(r.duration_ms or 0 for r in rows) or None,
+            error_message=next((r.error_message for r in rows if r.error_message), None),
+            trace_json={"events": events},
+            created_at=first.created_at,
+            expected_intent=None,
+            expected_slots=None,
+            expected_clarify_action=None,
+        )
+
+    async def _order_ground_truth(self, db: AsyncSession, user_id: int, merged) -> Optional[dict]:
+        """结果指标 ground truth：从链路事件提取订单号，查 travel_order 实际状态。"""
+        order_nos = self._parse_trace_json(merged).get("orderNos") or []
+        if not order_nos:
+            return None
+        res = await db.execute(
+            select(TravelOrderRow).where(
+                TravelOrderRow.user_id == user_id,
+                TravelOrderRow.order_no.in_(order_nos),
+            )
+        )
+        orders = list(res.scalars().all())
+        if not orders:
+            return None
+        return {"paid": any(o.status == OrderStatus.PAID.value for o in orders)}
 
     async def _evaluate_single_trace(
         self,
         row: RequestTraceRow,
         feedbacks: List[FeedbackRow],
         include_judge: bool,
+        ground_truth: Optional[dict] = None,
     ) -> TraceEvaluationResult:
         snapshot = self._parse_trace_json(row)
         metrics: Dict[str, Optional[float]] = {}
@@ -128,14 +206,18 @@ class EvaluationService:
         metrics["hallucinationControl"] = 1.0 if snapshot.get("hallucinationFree") else 0.0
         metrics["multiTurnConsistency"] = snapshot.get("multiTurnConsistency")
 
-        # ---- 出行域扩展指标（步骤 13） ----
-        metrics["planFeasibility"] = 1.0 if snapshot.get("planRanked") else None
-        metrics["bookingSuccessRate"] = self._booking_success(snapshot)
+        # ---- 出行域扩展指标（Commit 6：拆分语义，消除重叠） ----
+        metrics["planGenerated"] = 1.0 if snapshot.get("planRanked") else None
+        metrics["planConstraintSatisfied"] = self._plan_constraint_satisfied(snapshot)
+        metrics["planAvailabilityValid"] = self._plan_availability_valid(snapshot)
+        metrics["planSelected"] = self._plan_selected(snapshot)
         metrics["userConfirmRate"] = self._user_confirm(snapshot)
+        metrics["paymentSuccessRate"] = self._payment_success(snapshot, ground_truth)
         metrics["changeDecisionOptimality"] = self._change_optimality(snapshot)
         metrics["orderModifySuccessRate"] = self._order_modify_success(snapshot)
         metrics["savingsAchieved"] = self._savings_achieved(snapshot)
-        metrics["priceWatchHitRate"] = self._price_watch_hit(snapshot)
+        metrics["priceDropDetected"] = 1.0 if snapshot.get("priceDrop") else None
+        metrics["notificationSent"] = 1.0 if snapshot.get("priceDropNotified") else None
 
         judge_result = None
         if include_judge:
@@ -171,9 +253,12 @@ class EvaluationService:
             metrics["safetyCompliance"],
             metrics["hallucinationControl"],
             metrics["multiTurnConsistency"],
-            metrics["planFeasibility"],
-            metrics["bookingSuccessRate"],
+            metrics["planGenerated"],
+            metrics["planConstraintSatisfied"],
+            metrics["planAvailabilityValid"],
+            metrics["planSelected"],
             metrics["userConfirmRate"],
+            metrics["paymentSuccessRate"],
             metrics["changeDecisionOptimality"],
             metrics["orderModifySuccessRate"],
         ]
@@ -232,12 +317,16 @@ class EvaluationService:
         final_text = ""
         slots = {}
         plan_ranked = False
+        plan_option_count = 0
         booking_started = False
         payment_confirmed = False
         payment_detected = False
+        payment_layer3 = False
+        price_notified = False
         change_decision = None
         order_modified = False
         price_drop = False
+        order_nos = set()
 
         for raw_e in events:
             # Commit 5：写入与解析共用 TraceEventSchema（老事件缺少新字段时仍兼容）
@@ -261,6 +350,13 @@ class EvaluationService:
                     output = json.loads(out_str)
                 except Exception:
                     pass
+            inp_str = e.get("inputPayload")
+            inp = {}
+            if inp_str:
+                try:
+                    inp = json.loads(inp_str)
+                except Exception:
+                    pass
 
             if ev_type == EventType.INTENT_REVISED:
                 intent = output.get("intent") or intent
@@ -274,6 +370,10 @@ class EvaluationService:
                 plan_ranked = True
                 ranked = output.get("options") or []
                 ranked_ids.update(str(r) for r in ranked if r)
+                try:
+                    plan_option_count = max(plan_option_count, int(output.get("optionCount") or len(ranked_ids)))
+                except (TypeError, ValueError):
+                    plan_option_count = max(plan_option_count, len(ranked_ids))
             elif ev_type == EventType.RESPONSE_READY:
                 final_text = output.get("speechText") or final_text
                 blocks = output.get("displayBlocks") or []
@@ -282,14 +382,27 @@ class EvaluationService:
                         response_ids.add(str(b.get("planId")))
             elif ev_type == EventType.BOOKING_STARTED:
                 booking_started = True
+                order_no = output.get("orderNo") or inp.get("orderNo")
+                if order_no:
+                    order_nos.add(str(order_no))
             elif ev_type == EventType.PAYMENT_DETECTED:
                 payment_detected = True
+                if output.get("layer") == 3:
+                    payment_layer3 = True
+                order_no = inp.get("orderNo") or output.get("orderNo")
+                if order_no:
+                    order_nos.add(str(order_no))
             elif ev_type == EventType.PAYMENT_CONFIRMED:
                 payment_confirmed = True
+                order_no = inp.get("orderNo") or output.get("orderNo")
+                if order_no:
+                    order_nos.add(str(order_no))
             elif ev_type == EventType.ORDER_CHANGE_DECISION:
                 change_decision = output
             elif ev_type in (EventType.PRICE_WATCH_SCANNED, EventType.PRICE_DROP_DETECTED):
                 price_drop = True
+            elif ev_type == EventType.PRICE_DROP_NOTIFIED:
+                price_notified = True
             elif ev_type in (EventType.ORDER_CHANGED, EventType.ORDER_REFUNDED):
                 order_modified = True
             elif ev_type == EventType.ADJUST_CONTEXT_RESOLVED:
@@ -313,23 +426,46 @@ class EvaluationService:
             "finalText": final_text,
             "recommendationCount": len(response_ids),
             "planRanked": plan_ranked,
+            "planOptionCount": plan_option_count,
             "bookingStarted": booking_started,
             "paymentDetected": payment_detected,
+            "paymentLayer3": payment_layer3,
             "paymentConfirmed": payment_confirmed,
+            "priceDropNotified": price_notified,
+            "orderNos": sorted(order_nos),
             "changeDecision": change_decision,
             "orderModified": order_modified,
             "priceDrop": price_drop,
         }
 
-    def _booking_success(self, snapshot: dict) -> Optional[float]:
+    def _user_confirm(self, snapshot: dict) -> Optional[float]:
+        """用户是否明确确认（选择方案并触发下单即算确认；是否付成由 paymentSuccessRate 负责）。"""
         if snapshot.get("bookingStarted"):
-            return 1.0 if snapshot.get("paymentConfirmed") else 0.0
+            return 1.0
         return None
 
-    def _user_confirm(self, snapshot: dict) -> Optional[float]:
-        if snapshot.get("bookingStarted"):
-            return 1.0 if snapshot.get("paymentConfirmed") else 0.0
-        return None
+    def _payment_success(self, snapshot: dict, ground_truth: Optional[dict] = None) -> Optional[float]:
+        """确认后支付是否实际成功：travel_order 实际状态优先（ground truth），事件兜底。"""
+        if not snapshot.get("bookingStarted"):
+            return None
+        if ground_truth is not None and "paid" in ground_truth:
+            return 1.0 if ground_truth["paid"] else 0.0
+        return 1.0 if snapshot.get("paymentConfirmed") else 0.0
+
+    def _plan_constraint_satisfied(self, snapshot: dict) -> Optional[float]:
+        """生成了方案且硬过滤后仍有候选（optionCount>0）才算满足约束。"""
+        if not snapshot.get("planRanked"):
+            return None
+        return 1.0 if (snapshot.get("planOptionCount") or 0) > 0 else 0.0
+
+    def _plan_availability_valid(self, snapshot: dict) -> Optional[float]:
+        """候选来自真实查询结果；Mock 数据源下恒真，接入真实供应商后按数据源校验。"""
+        return 1.0 if snapshot.get("planRanked") else None
+
+    def _plan_selected(self, snapshot: dict) -> Optional[float]:
+        if not snapshot.get("planRanked"):
+            return None
+        return 1.0 if snapshot.get("bookingStarted") else 0.0
 
     def _change_optimality(self, snapshot: dict) -> Optional[float]:
         decision = snapshot.get("changeDecision")
@@ -357,11 +493,6 @@ class EvaluationService:
         if loss is None:
             return None
         return max(0.0, min(1.0, (-loss) / 1000.0))
-
-    def _price_watch_hit(self, snapshot: dict) -> Optional[float]:
-        if not snapshot.get("priceDrop"):
-            return None
-        return 1.0
 
     def _intent_accuracy(self, expected: Optional[str], actual: Optional[str]) -> Optional[float]:
         if not expected or not expected.strip():

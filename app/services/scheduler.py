@@ -17,6 +17,7 @@ from app.services.monitor import FlightMonitorService, PriceMonitorService
 from app.services.reminder import ReminderService
 from app.services.task import TaskService
 from app.services.trace import TraceScope
+from app.services.trace_schema import EventType
 
 log = logging.getLogger("travel.scheduler")
 
@@ -93,6 +94,8 @@ class SchedulerService:
                     try:
                         await self.task_service.start(db, task_id)
                         hit = await self.price_monitor.scan_phase1(db, trip)
+                        if hit:
+                            ctx.record_event(EventType.PRICE_DROP_NOTIFIED, "MONITOR", {"trip_id": trip.id}, {"hit": bool(hit)})
                         await self.task_service.succeed(db, task_id, result={"hit": bool(hit)}, notify=False)
                     except Exception as e:  # noqa: BLE001
                         await self.task_service.fail(db, task_id, str(e), retryable=True)
@@ -111,6 +114,8 @@ class SchedulerService:
                     try:
                         await self.task_service.start(db, task_id)
                         decision = await self.price_monitor.scan_phase2(db, order)
+                        if decision:
+                            ctx.record_event(EventType.PRICE_DROP_NOTIFIED, "MONITOR", {"order_no": order.order_no}, {"hit": bool(decision)})
                         await self.task_service.succeed(db, task_id, result={"hit": bool(decision)}, notify=False)
                     except Exception as e:  # noqa: BLE001
                         await self.task_service.fail(db, task_id, str(e), retryable=True)
