@@ -380,3 +380,7 @@ class SessionState(BaseModel):
     orderNo: Optional[str] = None
     # Commit 2：Memory 推断字段待用户确认的名单（高影响字段）
     pendingConfirms: List[str] = Field(default_factory=list)
+    # 分化方案 P0（Commit 1）：本次购票乘客
+    currentPassengerId: str = Field(default="0", description="本次购票乘客（本人默认 0）")
+    passengerSelectionPending: bool = Field(default=False, description="正在等待乘客选择回答")
+    passengerSelectionDone: bool = Field(default=False, description="本会话已确认过购票乘客")

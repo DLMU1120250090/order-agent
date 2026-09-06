@@ -58,6 +58,74 @@ MEMORY_CONFIRM_PATTERN = re.compile(
     r"^(好的?|可以|行吧|行|嗯+|对|对的|是|是的|按这个|就这样|没问题|ok|okay|同意|好呀|好嘞|好滴|成)$",
     re.IGNORECASE,
 )
+# 分化方案 P0（Commit 1）：乘客选择
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _self_passenger(profile) -> Optional[dict]:
+    if not profile:
+        return None
+    for p in profile.passengers or []:
+        if str(p.get("passenger_id") or "") == "0" or p.get("role") == "self":
+            return p
+    return None
+
+
+def _other_passengers(profile) -> list:
+    if not profile:
+        return []
+    return [
+        p for p in profile.passengers or []
+        if not (str(p.get("passenger_id") or "") == "0" or p.get("role") == "self")
+    ]
+
+
+def resolve_passenger_choice(text: str, profile) -> Optional[str]:
+    """解析乘客选择回复：本人 / 乘客名 / 第N个（N 对应非本人乘客列表）。解析失败返回 None。"""
+    if not profile or not text:
+        return None
+    t = (text or "").strip().strip("。！!？?，, ")
+    if not t:
+        return None
+    if t in ("0", "本人", "自己", "我自己", "给我自己", "我") or t.startswith("本人"):
+        return "0"
+    others = _other_passengers(profile)
+    if not others:
+        return "0"
+    # 编号：1/2/3 或 第N个
+    m = re.fullmatch(r"第?(\d+|[一二三四五六七八九十]+)个?", t)
+    if m:
+        raw = m.group(1)
+        idx = int(raw) if raw.isdigit() else _CN_NUM.get(raw, 0)
+        if 1 <= idx <= len(others):
+            return str(others[idx - 1].get("passenger_id") or "")
+    # 姓名包含匹配
+    for p in others:
+        name = str(p.get("name") or "")
+        if name and (name in t or t in name):
+            return str(p.get("passenger_id") or "")
+    return None
+
+
+def passenger_selection_question(profile) -> str:
+    others = _other_passengers(profile)
+    if not others:
+        return "这次还是给本人买票吗？回复“本人”即可。"
+    names = "、".join(f"{i}. {p.get('name')}" for i, p in enumerate(others, 1))
+    return f"这次给谁买票？回复“本人”，或告诉我乘客名字/编号（{names}）。"
+
+
+def passenger_selection_gate(profile, state) -> str:
+    """下单前乘客闸门：返回 passenger_id 直接下单；"ASK" 表示需要先询问。"""
+    if not profile or not profile.passengers:
+        return "0"
+    if not _other_passengers(profile):
+        return "0"
+    if state.passengerSelectionPending:
+        return "ASK"
+    if state.passengerSelectionDone:
+        return state.currentPassengerId or "0"
+    return "ASK"
 
 
 class TravelOrchestratorService:
@@ -184,6 +252,28 @@ class TravelOrchestratorService:
                 return await self._handle_plan(db, user_id, text, state, ctx, agent_set, empty_revised, adjust=False)
             state = state.model_copy(update={"pendingConfirms": []})
             await self._save_state(db, state)
+
+        # ③.6 乘客选择回答（分化方案 P0 / Commit 1）
+        if (
+            state.phase == SessionPhase.CLARIFY
+            and state.passengerSelectionPending
+            and state.currentIntent == Intent.PLAN_BOOK
+        ):
+            profile = await self.memory.get_profile(db, user_id)
+            chosen = resolve_passenger_choice(text, profile)
+            if not chosen:
+                question = passenger_selection_question(profile)
+                ctx.record_event("PASSENGER_SELECTION_RETRY", "PASSENGER", {"text": text}, {"question": question})
+                msg = OutboundMessage(channel=state.channel.value, kind="CLARIFY", text=question, blocks=[])
+                return self._finish(db, state, ctx, msg, clarify=True)
+            resolved_state = state.model_copy(update={
+                "currentPassengerId": chosen,
+                "passengerSelectionPending": False,
+                "passengerSelectionDone": True,
+            })
+            await self._save_state(db, resolved_state)
+            ctx.record_event("PASSENGER_SELECTED", "PASSENGER", {"text": text}, {"passengerId": chosen})
+            return await self._handle_book(db, user_id, text, resolved_state, ctx)
 
         # ④ 标准意图流
         agent_set = self.agent_factory.get(state.sessionId)
@@ -404,6 +494,22 @@ class TravelOrchestratorService:
             msg = OutboundMessage(channel=state.channel.value, text="请先选择要下单的方案（回复方案编号或“就订第一个”）。")
             return self._finish(db, state, ctx, msg)
 
+        # 分化方案 P0（Commit 1）：先确认"给谁买"，再记录 LIKE 与下单
+        profile = await self.memory.get_profile(db, user_id)
+        gate = passenger_selection_gate(profile, state)
+        if gate == "ASK":
+            question = passenger_selection_question(profile)
+            ask_state = state.model_copy(update={
+                "phase": SessionPhase.CLARIFY,
+                "currentIntent": Intent.PLAN_BOOK,
+                "passengerSelectionPending": True,
+                "passengerSelectionDone": False,
+            })
+            await self._save_state(db, ask_state)
+            ctx.record_event("PASSENGER_SELECTION_ASKED", "PASSENGER", {"passengerCount": len(profile.passengers or [])}, {"question": question})
+            msg = OutboundMessage(channel=state.channel.value, kind="CLARIFY", text=question, blocks=[])
+            return self._finish(db, ask_state, ctx, msg, clarify=True)
+
         # 用户以消息方式选择方案 → 记录正向反馈（LIKE），供评估系统使用
         await self._record_feedback(db, state, "LIKE", plan_id=str(selected), reason=f"用户选择方案下单: {text[:80]}", trace_id=ctx.trace_id)
 
@@ -413,8 +519,11 @@ class TravelOrchestratorService:
             return self._finish(db, state, ctx, msg)
         plan = PlanOption(**plan_row.plan_json)
 
-        profile = await self.memory.get_profile(db, user_id)
-        passengers = profile.passengers if profile and profile.passengers else None
+        passenger_id = gate if gate != "ASK" else "0"
+        passengers = [
+            p for p in (profile.passengers or [])
+            if str(p.get("passenger_id") or "") == str(passenger_id)
+        ] or None
         order = await self.booking.create_order_draft(
             db,
             user_id,
