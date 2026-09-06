@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.database import TripSummaryRow
 from app.models.schemas import TravelSlotBundle, UserProfile
 
 
@@ -113,12 +117,45 @@ class MemoryResolver:
 class MemoryContextBuilder:
     """按业务阶段构建结构化记忆上下文（Commit 2 先提供规划/澄清视图，Commit 7/8 扩展）。"""
 
-    @staticmethod
-    def build_for_planning(profile: Optional[UserProfile], result: MemoryResolveResult) -> dict:
+    async def build_for_planning(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        result: MemoryResolveResult,
+    ) -> dict:
+        """规划视图：user_context + resolved + 相似历史 Episode（L2，仅解释不排序）。"""
+        slots = result.slots
+        origin = (slots.origin or [None])[0]
+        destination = (slots.destination or [None])[0]
+        res = await db.execute(
+            select(TripSummaryRow)
+            .where(TripSummaryRow.user_id == user_id)
+            .order_by(TripSummaryRow.created_at.desc())
+            .limit(20)
+        )
+        similar = []
+        for r in res.scalars().all():
+            ep = r.episode_json or {}
+            ctx = ep.get("context") or {}
+            if origin and ctx.get("origin") != origin:
+                continue
+            if destination and ctx.get("destination") != destination:
+                continue
+            plan = ep.get("selected_plan") or {}
+            similar.append({
+                "orderNo": plan.get("order_no"),
+                "mode": plan.get("mode"),
+                "depart": plan.get("depart"),
+                "price": plan.get("price"),
+                "reason": (ep.get("decision_reason") or [])[:1],
+            })
+            if len(similar) >= 3:
+                break
         return {
-            "user_context": {
-                "home_city": profile.home_city if profile else None,
-                "budget_level": profile.budget_level if profile else None,
+            "userContext": {
+                "homeCity": (slots.origin or [None])[0],
+                "budget": (slots.budget or [None])[0],
             },
             "resolved": result.to_dict(),
+            "similarEpisodes": similar,
         }

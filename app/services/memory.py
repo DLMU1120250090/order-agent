@@ -17,6 +17,30 @@ from app.models.schemas import TripSummary, UserProfile
 log = logging.getLogger("travel.memory")
 
 
+def majority_transport_from_episodes(episodes: list) -> Optional[dict]:
+    """从结构化 Episode 统计首段交通方式高频项（Commit 7 规则蒸馏，不调 LLM）。
+
+    返回 {"value": "train|flight", "confidence": 占比, "count": n, "total": m}；
+    样本 < 3 或最高占比 < 60% 时不形成偏好（返回 None）。
+    """
+    counts = {"train": 0, "flight": 0}
+    for ep in episodes:
+        plan = (ep or {}).get("selected_plan") or {}
+        mode = str(plan.get("mode") or "").upper()
+        if mode == "TRAIN":
+            counts["train"] += 1
+        elif mode == "FLIGHT":
+            counts["flight"] += 1
+    total = counts["train"] + counts["flight"]
+    if total < 3:
+        return None
+    best = max(counts, key=counts.get)
+    ratio = counts[best] / total
+    if ratio < 0.6:
+        return None
+    return {"value": best, "confidence": round(ratio, 2), "count": counts[best], "total": total}
+
+
 class MemoryService:
     """
     记忆系统 L0–L3（C2 定稿）。
@@ -147,7 +171,33 @@ class MemoryService:
         md_path = self._l3_path(user_id)
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(text)
+        # Commit 7：规则蒸馏结构化偏好（高频交通方式），供 Planner/Resolver 消费
+        await self.distill_preferences(db, user_id)
         return text
+
+    async def distill_preferences(self, db: AsyncSession, user_id: int) -> Optional[dict]:
+        """从最近 Episode 蒸馏结构化偏好到 preferences_v2（Commit 7，无 LLM、幂等）。"""
+        res = await db.execute(
+            select(TripSummaryRow)
+            .where(
+                TripSummaryRow.user_id == user_id,
+                TripSummaryRow.episode_json.is_not(None),
+            )
+            .order_by(TripSummaryRow.created_at.desc())
+            .limit(20)
+        )
+        episodes = [r.episode_json or {} for r in res.scalars().all()]
+        pref = majority_transport_from_episodes(episodes)
+        if pref:
+            await self.update_preference(
+                db,
+                user_id,
+                "transport",
+                pref["value"],
+                confidence=pref["confidence"],
+                source="distilled",
+            )
+        return pref
 
     def _read_previous_conclusion(self, user_id: int) -> str:
         """读取该用户上一轮 L3 偏好结论（供新一轮蒸馏参考，保持长期连续性，不无限追加）。"""

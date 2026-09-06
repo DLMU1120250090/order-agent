@@ -69,6 +69,8 @@ class ItineraryPlanner:
         profile: Optional[UserProfile] = None,
     ) -> PlanDecision:
         """候选生成 + 硬过滤 + 打分排序（不落库，供离线 Replay dry-run）。"""
+        # 上游 MemoryResolver 已把 EXPLICIT/CONFIRMED/INFERRED 补全进 slots（Commit 7）；
+        # 此处 origin/tripDate 兜底仅覆盖直接调用/无画像场景，主排序权重 40/30/20/10 不变。
         origin = (slots.origin or [None])[0] or (profile.home_city if profile and profile.home_city else "北京")
         destination = (slots.destination or ["上海"])[0]
         trip_date = (slots.tripDate or [datetime.now().strftime("%Y-%m-%d")])[0]

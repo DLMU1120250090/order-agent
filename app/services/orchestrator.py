@@ -31,7 +31,7 @@ from app.services.collector import DataCollectorService
 from app.services.date_resolver import DateConsistencyService, DateResolverService
 from app.services.intent_revise import IntentReviseService
 from app.services.memory import MemoryService
-from app.services.memory_context import MemoryResolver
+from app.services.memory_context import MemoryContextBuilder, MemoryResolver
 from app.services.mock_supplier import mock_supplier
 from app.services.planner import ItineraryPlanner
 from app.services.push import PushService
@@ -93,6 +93,7 @@ class TravelOrchestratorService:
         self.date_consistency = DateConsistencyService()
         self.planner = ItineraryPlanner(self.collector)
         self.memory_resolver = MemoryResolver()
+        self.memory_builder = MemoryContextBuilder()
         self.session_locks = defaultdict(asyncio.Lock)
 
     async def handle_message(self, db: AsyncSession, inbound: InboundMessage) -> OutboundMessage:
@@ -340,9 +341,15 @@ class TravelOrchestratorService:
 
         # 记忆注入（L2 摘要 + L3 长期偏好快照；L1 已由 MemoryResolver 消费）
         memory_context = await self.memory.build_context(db, user_id)
+        planning_memory = await self.memory_builder.build_for_planning(db, user_id, resolved)
+        similar_context = str(planning_memory.get("similarEpisodes") or [])[:400]
         ctx.record_event(
             "MEMORY_INJECTED", "MEMORY", {"userId": user_id},
-            {"profile": profile.model_dump() if profile else None, "context": memory_context[:300]},
+            {
+                "profile": profile.model_dump() if profile else None,
+                "context": memory_context[:300],
+                "similarEpisodes": planning_memory.get("similarEpisodes") or [],
+            },
         )
 
         decision = await self.planner.plan(db, user_id, planning_slots, profile)
@@ -356,7 +363,8 @@ class TravelOrchestratorService:
         blocks = [self._plan_card(o, plan_no=idx) for idx, o in enumerate(decision.options, 1)]
         top_plans = [{"planId": o.plan_id, "legs": [l.model_dump() for l in o.legs], "totalPrice": o.total_price, "totalDurationH": o.total_duration_h, "score": o.score} for o in decision.options]
         speech = await self._recommend_speech(
-            db, state, ctx, agent_set, text, planning_slots, top_plans, decision.reason, memory_context=memory_context,
+            db, state, ctx, agent_set, text, planning_slots, top_plans, decision.reason,
+            memory_context=memory_context, similar_context=similar_context,
         )
 
         plan_ids = [o.plan_id for o in decision.options]
@@ -834,7 +842,10 @@ class TravelOrchestratorService:
         except Exception:  # noqa: BLE001
             return self.clarify_rules.fallback_question(missing)
 
-    async def _recommend_speech(self, db, state, ctx, agent_set, user_input, slots, top_plans, fallback_reason, memory_context: str = "") -> str:
+    async def _recommend_speech(
+        self, db, state, ctx, agent_set, user_input, slots, top_plans, fallback_reason,
+        memory_context: str = "", similar_context: str = "",
+    ) -> str:
         body = self._plan_template(top_plans, fallback_reason)
         try:
             res = await traced_agent_call(
@@ -846,6 +857,7 @@ class TravelOrchestratorService:
                     "slots": str(slots.model_dump()),
                     "top_plans": str(top_plans),
                     "memory_context": memory_context or "（暂无）",
+                    "similar_context": similar_context or "（暂无相似案例）",
                 },
                 user_input_text=user_input,
             )
