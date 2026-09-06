@@ -1,13 +1,27 @@
 <template>
   <div class="workspace-container">
-    <!-- Left 70%: Conversation Area -->
+    <!-- Left: Session History Sidebar (ChatGPT style) -->
+    <SessionSidebar />
+
+    <!-- Center: Conversation Area -->
     <section class="conversation-pane">
       <!-- Session Bar -->
       <div class="session-bar">
         <div class="session-info">
+          <!-- Expand sidebar button when collapsed -->
+          <button
+            v-if="chatStore.isSidebarCollapsed"
+            type="button"
+            class="sidebar-expand-btn"
+            title="展开会话历史"
+            @click="chatStore.toggleSidebar"
+          >
+            <el-icon><Expand /></el-icon>
+          </button>
           <span class="session-dot"></span>
-          <span class="session-label">会话 ID:</span>
-          <span class="session-id">{{ chatStore.sessionId || '正在连接...' }}</span>
+          <span class="session-label">当前会话:</span>
+          <span class="session-title-tag" :title="currentSessionTitle">{{ currentSessionTitle }}</span>
+          <span class="session-id">({{ chatStore.sessionId || '正在连接...' }})</span>
         </div>
         <div class="session-actions">
           <el-button size="small" plain @click="handleNewSession">
@@ -137,9 +151,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useChatStore, QUICK_QUESTIONS } from '@/stores/chat'
 import { useRuntimeStore } from '@/stores/runtime'
+import { useUserStore } from '@/stores/user'
+import SessionSidebar from '@/components/chat/SessionSidebar.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
 import AgentStatus from '@/components/runtime/AgentStatus.vue'
 import MemoryContext from '@/components/runtime/MemoryContext.vue'
@@ -147,13 +163,27 @@ import TracePreview from '@/components/runtime/TracePreview.vue'
 
 const chatStore = useChatStore()
 const runtimeStore = useRuntimeStore()
+const userStore = useUserStore()
 const inputMessage = ref('')
 const messagesContainer = ref<HTMLElement | null>(null)
+
+const currentSessionTitle = computed(() => {
+  const current = chatStore.sessionList.find(s => s.sessionId === chatStore.sessionId)
+  return current?.title || '新出行规划会话'
+})
 
 onMounted(async () => {
   await chatStore.initSession()
   scrollToBottom()
 })
+
+// Refetch if user changes
+watch(
+  () => userStore.userId,
+  async () => {
+    await chatStore.initSession()
+  }
+)
 
 watch(
   () => chatStore.messages.length,
@@ -169,6 +199,8 @@ watch(
   (newTraceId) => {
     if (newTraceId) {
       runtimeStore.fetchTrace(newTraceId)
+    } else {
+      runtimeStore.reset()
     }
   },
   { immediate: true }
@@ -201,9 +233,9 @@ function sendQuickQuestion(q: string) {
   nextTick(() => scrollToBottom())
 }
 
-function handleNewSession() {
+async function handleNewSession() {
   runtimeStore.reset()
-  chatStore.initSession(true)
+  await chatStore.createNewSession()
 }
 </script>
 
@@ -245,6 +277,26 @@ function handleNewSession() {
   font-size: 12px;
 }
 
+.sidebar-expand-btn {
+  background: transparent;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 3px 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #475569;
+  margin-right: 4px;
+  transition: all 0.15s ease;
+}
+
+.sidebar-expand-btn:hover {
+  background: #eff6ff;
+  color: #2563eb;
+  border-color: #93c5fd;
+}
+
 .session-dot {
   width: 7px;
   height: 7px;
@@ -256,10 +308,19 @@ function handleNewSession() {
   color: #94a3b8;
 }
 
+.session-title-tag {
+  font-weight: 700;
+  color: #0f172a;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-id {
   font-family: monospace;
-  color: #475569;
-  font-weight: 500;
+  color: #94a3b8;
+  font-size: 11px;
 }
 
 .messages-stream {

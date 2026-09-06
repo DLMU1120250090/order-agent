@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { chatApi } from '@/api/chat'
+import { sessionApi } from '@/api/session'
 import { sseService } from '@/services/sse'
-import type { ChatMessage, TravelChatResponse } from '@/types/chat'
+import type { ChatMessage, SessionItem } from '@/types/chat'
 import { ElMessage } from 'element-plus'
 
 export const QUICK_QUESTIONS = [
@@ -22,51 +23,59 @@ const WELCOME_TEXT =
 
 export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string>('')
+  const sessionList = ref<SessionItem[]>([])
+  const isLoadingSessions = ref<boolean>(false)
+  const isSidebarCollapsed = ref<boolean>(localStorage.getItem('chat.sidebarCollapsed') === 'true')
   const messages = ref<ChatMessage[]>([])
   const isSending = ref<boolean>(false)
   const activeTaskId = ref<string | null>(null)
   const latestTraceId = ref<string | null>(null)
 
-  // Initialize session and restore messages
-  async function initSession(forceNew = false) {
-    if (sessionId.value && !forceNew && messages.value.length > 0) {
-      return
+  function toggleSidebar() {
+    isSidebarCollapsed.value = !isSidebarCollapsed.value
+    localStorage.setItem('chat.sidebarCollapsed', String(isSidebarCollapsed.value))
+  }
+
+  // Load user sessions
+  async function loadSessionList() {
+    isLoadingSessions.value = true
+    try {
+      const list = await sessionApi.listSessions(50)
+      sessionList.value = list || []
+    } catch (err) {
+      console.warn('[ChatStore] Failed to load sessions:', err)
+      sessionList.value = []
+    } finally {
+      isLoadingSessions.value = false
     }
+  }
+
+  // Switch to a specific session
+  async function switchSession(targetSessionId: string) {
+    if (!targetSessionId) return
+    sessionId.value = targetSessionId
+    messages.value = []
+    latestTraceId.value = null
 
     try {
-      if (forceNew) {
-        const res = await chatApi.createSession()
-        sessionId.value = res.sessionId
-        messages.value = []
-      } else {
-        try {
-          const res = await chatApi.latestSession()
-          sessionId.value = res.sessionId
-        } catch {
-          const created = await chatApi.createSession()
-          sessionId.value = created.sessionId
+      const history = await chatApi.sessionMessages(targetSessionId, 50)
+      if (Array.isArray(history) && history.length > 0) {
+        messages.value = history.map((item, idx) => ({
+          id: `msg_hist_${idx}_${Date.now()}`,
+          role: item.role === 'user' ? 'user' : 'assistant',
+          text: item.content || item.text || '',
+          timestamp: item.created_at || (item.createdAt ? new Date(item.createdAt).toLocaleTimeString() : new Date().toLocaleTimeString()),
+          displayBlocks: item.display_blocks || item.displayBlocks || [],
+          traceId: item.agent_trace_id || item.traceId,
+        }))
+
+        // Restore latest traceId if any
+        const lastWithTrace = [...history].reverse().find(m => m.agent_trace_id || m.traceId)
+        if (lastWithTrace) {
+          latestTraceId.value = lastWithTrace.agent_trace_id || lastWithTrace.traceId
         }
       }
 
-      // Load history
-      if (!forceNew && sessionId.value) {
-        try {
-          const history = await chatApi.sessionMessages(sessionId.value, 30)
-          if (Array.isArray(history) && history.length > 0) {
-            messages.value = history.map((item, idx) => ({
-              id: `msg_hist_${idx}_${Date.now()}`,
-              role: item.role === 'user' ? 'user' : 'assistant',
-              text: item.content || item.text || '',
-              timestamp: item.created_at || new Date().toLocaleTimeString(),
-              displayBlocks: item.display_blocks || item.displayBlocks || [],
-            }))
-          }
-        } catch (e) {
-          console.warn('[ChatStore] Failed to restore history messages:', e)
-        }
-      }
-
-      // If still empty, add welcome message
       if (messages.value.length === 0) {
         messages.value.push({
           id: `msg_welcome_${Date.now()}`,
@@ -76,8 +85,98 @@ export const useChatStore = defineStore('chat', () => {
         })
       }
     } catch (err: any) {
-      console.error('[ChatStore] initSession error:', err)
-      ElMessage.error(err.message || '初始化会话失败')
+      console.warn('[ChatStore] Failed to load session messages:', err)
+      messages.value.push({
+        id: `msg_welcome_${Date.now()}`,
+        role: 'assistant',
+        text: WELCOME_TEXT,
+        timestamp: new Date().toLocaleTimeString(),
+      })
+    }
+  }
+
+  // Create a new session
+  async function createNewSession() {
+    try {
+      const res = await chatApi.createSession()
+      const newSessId = res.sessionId
+      sessionId.value = newSessId
+      latestTraceId.value = null
+      messages.value = [
+        {
+          id: `msg_welcome_${Date.now()}`,
+          role: 'assistant',
+          text: WELCOME_TEXT,
+          timestamp: new Date().toLocaleTimeString(),
+        },
+      ]
+
+      // Prepend to list
+      const newItem: SessionItem = {
+        sessionId: newSessId,
+        title: '新出行规划会话',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 0,
+      }
+      sessionList.value.unshift(newItem)
+      return newSessId
+    } catch (err: any) {
+      ElMessage.error(`创建新会话失败: ${err.message}`)
+      throw err
+    }
+  }
+
+  // Delete a session
+  async function deleteSession(targetSessionId: string) {
+    try {
+      await sessionApi.deleteSession(targetSessionId)
+      sessionList.value = sessionList.value.filter(s => s.sessionId !== targetSessionId)
+      ElMessage.success('会话已删除')
+
+      if (sessionId.value === targetSessionId) {
+        if (sessionList.value.length > 0) {
+          await switchSession(sessionList.value[0].sessionId)
+        } else {
+          await createNewSession()
+        }
+      }
+    } catch (err: any) {
+      ElMessage.error(`删除会话失败: ${err.message}`)
+    }
+  }
+
+  // Rename a session
+  async function renameSession(targetSessionId: string, newTitle: string) {
+    const trimmed = newTitle.trim()
+    if (!trimmed) return
+    try {
+      await sessionApi.updateSessionTitle(targetSessionId, trimmed)
+      const found = sessionList.value.find(s => s.sessionId === targetSessionId)
+      if (found) {
+        found.title = trimmed
+      }
+      ElMessage.success('会话标题已更新')
+    } catch (err: any) {
+      ElMessage.error(`更新标题失败: ${err.message}`)
+    }
+  }
+
+  // Initialize session and restore messages
+  async function initSession(forceNew = false) {
+    await loadSessionList()
+
+    if (forceNew) {
+      await createNewSession()
+      return
+    }
+
+    if (sessionList.value.length > 0) {
+      // Find current or first
+      const target = sessionList.value.find(s => s.sessionId === sessionId.value) || sessionList.value[0]
+      await switchSession(target.sessionId)
+    } else {
+      await createNewSession()
     }
   }
 
@@ -88,6 +187,14 @@ export const useChatStore = defineStore('chat', () => {
 
     if (!sessionId.value) {
       await initSession()
+    }
+
+    // Auto title generation if this is the first message or default title
+    const currentItem = sessionList.value.find(s => s.sessionId === sessionId.value)
+    if (currentItem && (currentItem.title === '新出行规划会话' || currentItem.title === '新会话' || !currentItem.title)) {
+      const autoTitle = trimmed.length > 20 ? trimmed.slice(0, 20) + '...' : trimmed
+      currentItem.title = autoTitle
+      sessionApi.updateSessionTitle(sessionId.value, autoTitle).catch(() => {})
     }
 
     const userMsgId = `msg_user_${Date.now()}`
@@ -130,6 +237,11 @@ export const useChatStore = defineStore('chat', () => {
         taskId: resp.taskId,
         orderNo: resp.orderNo,
       })
+
+      if (currentItem) {
+        currentItem.messageCount = (currentItem.messageCount || 0) + 2
+        currentItem.updatedAt = new Date().toISOString()
+      }
     } catch (err: any) {
       console.error('[ChatStore] sendMessage error:', err)
       messages.value.push({
@@ -182,7 +294,6 @@ export const useChatStore = defineStore('chat', () => {
       if (taskId) {
         activeTaskId.value = taskId
       }
-      // Check if there is an active message with matching taskId
       const matched = messages.value.slice().reverse().find((m) => m.taskId === taskId)
       if (matched) {
         matched.text = progress.message || progress.step || matched.text
@@ -190,7 +301,6 @@ export const useChatStore = defineStore('chat', () => {
           matched.responseType = 'TASK_PROGRESS'
         }
       } else if (data.text) {
-        // Append progress notice if substantial
         messages.value.push({
           id: `msg_sse_task_${Date.now()}`,
           role: 'assistant',
@@ -236,10 +346,19 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessionId,
+    sessionList,
+    isLoadingSessions,
+    isSidebarCollapsed,
     messages,
     isSending,
     activeTaskId,
     latestTraceId,
+    toggleSidebar,
+    loadSessionList,
+    switchSession,
+    createNewSession,
+    deleteSession,
+    renameSession,
     initSession,
     sendMessage,
     submitFeedback,

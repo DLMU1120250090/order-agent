@@ -62,3 +62,12 @@ export interface TravelChatResponse {
   taskId?: string
   orderNo?: string
 }
+
+export interface SessionItem {
+  sessionId: string
+  title: string
+  phase?: string
+  createdAt?: string
+  updatedAt?: string
+  messageCount?: number
+}
