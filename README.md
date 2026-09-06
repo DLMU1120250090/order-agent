@@ -9,8 +9,9 @@
 - 行程规划：自研约束求解器枚举直连/中转组合，按价格、耗时、时刻、偏好加权打分取 Top3，LLM 仅生成文案
 - 订单与支付：幂等防重复下单，Playwright 自动化收银台 → 二维码即推，三层支付检测，全程人机确认、绝不代付
 - 改签退票：可解释成本模型自动推荐损失最小方案，改签/退票/降价/航变四场景复用
-- 主动服务：后台任务状态机 + 定时调度，价格监控、航变监控、出发前提醒，Web/钉钉/微信多通道推送，四级记忆体系
-- 可观测与评估：全链路 Trace 落库回放，规则 + 模型评审 + 用户反馈加权评估闭环
+- 主动服务：后台任务状态机 + 定时调度，价格监控、航变监控、出发前提醒，Web/钉钉/微信多通道推送
+- 记忆驱动决策：L1 画像 / L2 结构化行程 Episode / L3 蒸馏偏好；记忆补全缺失字段需用户显式确认，相似历史进入推荐解释，降价/改签/提醒按用户偏好调节，业务规则始终把关
+- 可观测与评估：全链路 Trace（含后台任务的 run/task 关联与订单状态链）落库可查；离线 Replay dry-run 回放 + Failure Taxonomy 失败分类；规则 60% + 模型评审 10% + 用户反馈 30% 按业务链路聚合评估
 
 ## 技术栈
 
@@ -49,8 +50,17 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
 - `alembic/`：数据库版本迁移（Alembic，含 baseline 全量建表）
 - `static/`：前端页面与 Mock 收银台
 - `prompts/`：Agent 提示词
+- `skills/`：领域技能（SKILL.md，含 RAG retriever 预留位，改文本无需改代码）
 - `sql/`：建表 SQL 存档（已被 Alembic 迁移取代）
-- `tests_e2e_mock.py`：端到端测试
+- `sql/backfills/`：存量数据一次性回填脚本
+- `replays/`：离线 Replay 实验留档
+- `tests/`：单元测试（pytest）；`tests_e2e_mock.py`：端到端测试
+
+## 调试与评估
+
+- `POST /api/v1/travel/debug/replay`：单条 Trace 规则层 dry-run 重放，返回 before/after 字段级 diff（不调 LLM、不落业务数据）
+- `POST /api/v1/travel/debug/replay/cases`：按失败主题（recovery / recommendation_reject）收集回归 case 集
+- `POST /api/v1/travel/evaluations`：时间范围评估，返回业务链路级指标（linkResults / totalLinks）与失败分类分布（failureDistribution）
 
 ## 说明
 
