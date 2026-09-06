@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Header, Depends, HTTPException
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.database import FeedbackRow
+from app.models.database import FeedbackRow, RequestTraceRow
 from app.models.schemas import FeedbackRequest
 from app.services.runtime import memory
 
@@ -19,13 +20,29 @@ async def save(
     if not request.sessionId or not request.sessionId.strip():
         raise HTTPException(status_code=400, detail="反馈 sessionId 不能为空")
     if not request.action or not request.action.strip():
-        raise HTTPException(status_code=400, detail="反馈 action 不能为空")
+        raise HTTPException(status_code=400, detail="action 不能为空")
+
+    # Commit 9：反馈归因到 Trace（前端带 traceId 直接用；没有则按 session 最近一条兜底）
+    trace_id = request.traceId
+    if not trace_id:
+        res = await db.execute(
+            select(RequestTraceRow)
+            .where(
+                RequestTraceRow.session_id == request.sessionId,
+                RequestTraceRow.user_id == x_user_id,
+            )
+            .order_by(desc(RequestTraceRow.created_at))
+            .limit(1)
+        )
+        row = res.scalars().first()
+        trace_id = row.trace_id if row else None
 
     fb = FeedbackRow(
         user_id=x_user_id,
         session_id=request.sessionId,
         item_id=request.itemId,
         plan_id=request.planId,
+        trace_id=trace_id,
         action=request.action,
         rating=request.rating,
         reason=request.reason,

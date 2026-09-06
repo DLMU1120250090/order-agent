@@ -1,5 +1,6 @@
 import json
 import logging
+from collections import Counter
 from datetime import datetime
 from types import SimpleNamespace
 from typing import List, Dict, Optional, Any
@@ -20,6 +21,11 @@ log = logging.getLogger("travel.evaluation")
 SLOT_NAMES = {"destination", "tripDate", "budget", "travelStyle", "transportMode", "companion"}
 # 资金/绝对化敏感词（合规项扣分）
 FORBIDDEN_PHRASES = ["代付", "自动付款", "替我付款", "保证", "包退"]
+# Commit 9：失败分类（Failure Taxonomy，第一轮实现子集）
+FAILURE_TAXONOMY = [
+    "Understanding", "Clarification", "Planning", "Recommendation",
+    "Tool", "StateTransition", "Policy", "Recovery", "UX",
+]
 
 
 class EvaluationService:
@@ -61,6 +67,7 @@ class EvaluationService:
                 labeledTraces=0,
                 avgScore=None,
                 metricAverages={},
+                failureDistribution={},
                 traceResults=[],
                 linkResults=[],
             )
@@ -117,6 +124,11 @@ class EvaluationService:
                 if val is not None:
                     metrics_lists.setdefault(name, []).append(val)
         metric_averages = {name: self._average(vals) for name, vals in metrics_lists.items()}
+        failure_counter = Counter()
+        for tr in primary:
+            for failure_type in tr.detail.get("failureTypes") or []:
+                failure_counter[failure_type] += 1
+        failure_distribution = dict(sorted(failure_counter.items()))
 
         return EvaluationReport(
             startAt=request.startAt,
@@ -126,6 +138,7 @@ class EvaluationService:
             labeledTraces=labeled_traces,
             avgScore=avg_score,
             metricAverages=metric_averages,
+            failureDistribution=failure_distribution,
             traceResults=trace_results,
             linkResults=link_results,
         )
@@ -243,6 +256,7 @@ class EvaluationService:
                 log.warning("大模型裁判调用失败 trace_id=%s: %s", row.trace_id, e)
 
         fb_score = self._feedback_score(feedbacks)
+        failure_types = self._classify_failures(metrics, snapshot, feedbacks, row)
         rule_metrics = [
             metrics["intentAccuracy"],
             metrics["slotAccuracy"],
@@ -280,6 +294,7 @@ class EvaluationService:
             "expectedSlots": self._parse_json_safe(row.expected_slots),
             "expectedClarifyAction": row.expected_clarify_action,
             "feedbackCount": len(feedbacks),
+            "failureTypes": failure_types,
             "judgeMode": "LLM_AS_JUDGE" if include_judge else "DISABLED",
             "judgeReason": judge_result["reason"] if judge_result else None,
         }
@@ -295,6 +310,37 @@ class EvaluationService:
             metrics=metrics,
             detail=detail,
         )
+
+    @staticmethod
+    def _classify_failures(metrics: dict, snapshot: dict, feedbacks: List[FeedbackRow], row) -> List[str]:
+        """按可观察证据归类失败（第一轮子集，Commit 10 据此选题）。"""
+        types = []
+        if metrics.get("intentAccuracy") == 0 or metrics.get("slotAccuracy") == 0:
+            types.append("Understanding")
+        if metrics.get("clarifyNecessityAccuracy") == 0:
+            types.append("Clarification")
+        if metrics.get("planGenerated") == 1 and metrics.get("planConstraintSatisfied") == 0:
+            types.append("Planning")
+        if any((fb.action or "").upper() in ("DISLIKE", "REJECT", "SWITCH", "REFRESH") for fb in feedbacks):
+            types.append("Recommendation")
+        if snapshot.get("safetyCompliance") is False:
+            types.append("Policy")
+
+        # 从事件扫描工具/恢复类失败
+        raw = row.trace_json
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                raw = {}
+        events = (raw or {}).get("events") or []
+        task_failed = any(e.get("eventType") == EventType.TASK_FAILED for e in events)
+        request_failed = any(e.get("eventType") == EventType.REQUEST_FAILED for e in events)
+        if task_failed:
+            types.append("Tool")
+        elif request_failed or row.status == "FAILED":
+            types.append("Recovery")
+        return [name for name in FAILURE_TAXONOMY if name in set(types)]
 
     def _parse_trace_json(self, row: RequestTraceRow) -> dict:
         events = []

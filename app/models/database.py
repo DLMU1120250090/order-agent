@@ -80,6 +80,8 @@ class FeedbackRow(SQLModel, table=True):
     session_id: str = Field(max_length=64)
     item_id: Optional[int] = None
     plan_id: Optional[str] = Field(default=None, max_length=64)
+    # Commit 9：反馈归因到具体 Trace（可回答"差评在说哪个动作"）
+    trace_id: Optional[str] = Field(default=None, max_length=128)
     action: str = Field(max_length=32)
     rating: Optional[int] = None
     reason: Optional[str] = Field(default=None, max_length=512)

@@ -289,6 +289,7 @@ class FeedbackRequest(BaseModel):
     sessionId: str
     itemId: Optional[int] = None
     planId: Optional[str] = None
+    traceId: Optional[str] = Field(default=None, description="来源 Trace（无则按 session 最近一条兜底）")
     action: str = Field(..., description="LIKE / DISLIKE / SWITCH")
     rating: Optional[int] = Field(default=None, description="评分(1-5星)")
     reason: Optional[str] = None
@@ -324,6 +325,7 @@ class EvaluationReport(BaseModel):
     labeledTraces: int
     avgScore: Optional[float] = None
     metricAverages: Dict[str, Optional[float]]
+    failureDistribution: Dict[str, int] = Field(default_factory=dict)  # Commit 9：失败分类计数
     traceResults: List[TraceEvaluationResult]
     linkResults: List[TraceEvaluationResult] = Field(default_factory=list)  # Commit 6：链路级评估
 

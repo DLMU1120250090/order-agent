@@ -429,8 +429,8 @@
                     </header>
                     <div>${legs}</div>
                     <div class="button-row">
-                        <button class="btn soft" data-action="feedback" data-action-value="LIKE" data-plan-id="${escapeHtml(block.planId)}" data-session-id="${escapeHtml(message.sessionId || "")}">采纳</button>
-                        <button class="btn ghost" data-action="feedback" data-action-value="DISLIKE" data-plan-id="${escapeHtml(block.planId)}" data-session-id="${escapeHtml(message.sessionId || "")}">不采纳</button>
+                        <button class="btn soft" data-action="feedback" data-action-value="LIKE" data-plan-id="${escapeHtml(block.planId)}" data-session-id="${escapeHtml(message.sessionId || "")}" data-trace-id="${escapeHtml(message.traceId || "")}">采纳</button>
+                        <button class="btn ghost" data-action="feedback" data-action-value="DISLIKE" data-plan-id="${escapeHtml(block.planId)}" data-session-id="${escapeHtml(message.sessionId || "")}" data-trace-id="${escapeHtml(message.traceId || "")}">不采纳</button>
                     </div>
                 </article>
             `;
@@ -1098,6 +1098,7 @@
             await TravelApi.saveFeedback({
                 sessionId: button.dataset.sessionId || state.chat.sessionId,
                 planId: button.dataset.planId || null,
+                traceId: button.dataset.traceId || null,
                 action: button.dataset.actionValue,
                 rating: button.dataset.actionValue === "DISLIKE" ? 2 : 5,
                 reason: ""

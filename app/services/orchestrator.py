@@ -268,7 +268,7 @@ class TravelOrchestratorService:
         if adjust:
             rejected = state.selectedPlanId or (state.currentBatch[-1] if state.currentBatch else None)
             action = "DISLIKE" if any(k in text for k in ("太贵", "不好", "不喜欢", "不满意")) else "SWITCH"
-            await self._record_feedback(db, state, action, plan_id=rejected, reason=f"用户调整方案: {text[:80]}")
+            await self._record_feedback(db, state, action, plan_id=rejected, reason=f"用户调整方案: {text[:80]}", trace_id=ctx.trace_id)
 
         merged = self._merge_slots(state.slots, revised.slots)
         merged, fuzzy = await self._resolve_dates(db, merged)
@@ -404,7 +404,7 @@ class TravelOrchestratorService:
             return self._finish(db, state, ctx, msg)
 
         # 用户以消息方式选择方案 → 记录正向反馈（LIKE），供评估系统使用
-        await self._record_feedback(db, state, "LIKE", plan_id=str(selected), reason=f"用户选择方案下单: {text[:80]}")
+        await self._record_feedback(db, state, "LIKE", plan_id=str(selected), reason=f"用户选择方案下单: {text[:80]}", trace_id=ctx.trace_id)
 
         plan_row = await trip_crud.get_plan(db, int(selected))
         if not plan_row:
@@ -1093,7 +1093,10 @@ class TravelOrchestratorService:
     async def _save_state(self, db, state: SessionState):
         await session_crud.save_session_state(db, state)
 
-    async def _record_feedback(self, db: AsyncSession, state: SessionState, action: str, plan_id: Optional[str] = None, reason: str = ""):
+    async def _record_feedback(
+        self, db: AsyncSession, state: SessionState, action: str,
+        plan_id: Optional[str] = None, reason: str = "", trace_id: Optional[str] = None,
+    ):
         """把对话中的方案选择/调整落成反馈（推荐反馈表），供评估的用户反馈维度使用。"""
         try:
             rating = 5 if action.upper() in ("LIKE", "ADOPT", "ACCEPT") else (2 if action.upper() in ("DISLIKE", "REJECT") else None)
@@ -1101,6 +1104,7 @@ class TravelOrchestratorService:
                 user_id=state.userId,
                 session_id=state.sessionId,
                 plan_id=plan_id,
+                trace_id=trace_id,
                 action=action,
                 rating=rating,
                 reason=(reason or "")[:512],
