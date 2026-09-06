@@ -30,3 +30,13 @@
 - 其余乘客：`role = "others"`（历史 `companion` 并入 others，读方兼容期两者都接受）；
 - 不记录 User↔Passenger 关系表；当前单 User（user_id=1）；
 - 多乘客且无显式标记时不猜本人（不依赖列表位置）；单人无标记默认本人（本人购票兜底）。
+
+## 补充：L3 蒸馏扩展登记（Commit 4，2026-09-06）
+
+| key | 归属 | 写方 | 读方 | 处置 |
+| --- | --- | --- | --- | --- |
+| transport | passengers.{pid}（本人=0） | distill_preferences（按乘客分组，样本≥3 且占比≥60%） | MemoryResolver / Planner 软排序 | 已落地 |
+| time_window | passengers.{pid} | distill_preferences（早班 05-08 占比≥60%） | Resolver 视图（消费待定） | 已落地（透传） |
+| price_sensitivity | user | distill_preferences（价格事件接受率 ≥60% high / ≤30% low） | 登记，Monitor 阈值消费待定 | 已落地（蒸馏写） |
+| confirmation_style / notification_channel / auto_action | user | 可手工写入（profiles API / update_preference） | 暂无（避免虚假消费） | 登记待消费 |
+| conditions | 任意 entry 内可选字段 | update_preference(conditions=...) | Resolver 透传（暂不匹配） | 预留 |

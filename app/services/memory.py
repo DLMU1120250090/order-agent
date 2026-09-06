@@ -13,6 +13,7 @@ from app.config import get_light_model
 from app.crud import profile as profile_crud
 from app.models.database import TripSummaryRow
 from app.models.schemas import TripSummary, UserProfile
+from app.services.user_memory_events import UserEventType, recent_user_events
 
 log = logging.getLogger("travel.memory")
 
@@ -39,6 +40,71 @@ def majority_transport_from_episodes(episodes: list) -> Optional[dict]:
     if ratio < 0.6:
         return None
     return {"value": best, "confidence": round(ratio, 2), "count": counts[best], "total": total}
+
+
+def _morning_share_from_episodes(episodes: list) -> Optional[dict]:
+    """统计早班（05:00~08:59 出发）占比；样本 >=3 且占比 >=60% 才形成 time_window=morning。"""
+    morning = 0
+    total = 0
+    for ep in episodes:
+        plan = (ep or {}).get("selected_plan") or {}
+        depart = str(plan.get("depart") or "")
+        try:
+            hour = int(depart.split(":")[0])
+        except (TypeError, ValueError):
+            continue
+        total += 1
+        if 5 <= hour < 9:
+            morning += 1
+    if total < 3:
+        return None
+    ratio = morning / total
+    if ratio < 0.6:
+        return None
+    return {"value": "morning", "confidence": round(ratio, 2), "count": morning, "total": total}
+
+
+def passenger_preferences_from_episodes(episodes: list) -> dict:
+    """按乘客分组蒸馏（分化方案 A1/P2）：transport / time_window 写入 preferences_v2.passengers。
+
+    episodes 形如 [{"passengers": ["0", "P_x"], "selected_plan": {...}}, ...]。
+    """
+    grouped: dict = {}
+    for ep in episodes:
+        for pid in (ep or {}).get("passengers") or []:
+            grouped.setdefault(str(pid), []).append(ep)
+    result = {}
+    for pid, rows in grouped.items():
+        transport = majority_transport_from_episodes(rows)
+        time_window = _morning_share_from_episodes(rows)
+        prefs = {}
+        if transport:
+            prefs["transport"] = {
+                "value": transport["value"],
+                "confidence": transport["confidence"],
+                "source": "distilled",
+            }
+        if time_window:
+            prefs["time_window"] = {
+                "value": time_window["value"],
+                "confidence": time_window["confidence"],
+                "source": "distilled",
+            }
+        if prefs:
+            result[pid] = prefs
+    return result
+
+
+def price_sensitivity_from_events(events) -> Optional[dict]:
+    """从 User L2 价格事件蒸馏 price_sensitivity（接受率 >=60% high / <=30% low / 其余 medium）。"""
+    accepted = sum(1 for e in events if e.event_type == UserEventType.PRICE_DROP_ACCEPTED)
+    ignored = sum(1 for e in events if e.event_type == UserEventType.PRICE_DROP_IGNORED)
+    total = accepted + ignored
+    if total < 3:
+        return None
+    ratio = accepted / total
+    value = "high" if ratio >= 0.6 else ("low" if ratio <= 0.3 else "medium")
+    return {"value": value, "confidence": round(ratio, 2), "count": accepted, "total": total}
 
 
 class MemoryService:
@@ -110,8 +176,12 @@ class MemoryService:
         passenger_id: Optional[str] = None,
         confidence: Optional[float] = None,
         source: str = "rule",
+        conditions: Optional[dict] = None,
     ) -> Optional[UserProfile]:
-        """统一偏好写入（Commit 1）：user 级（默认）或 passenger 级，写入 preferences_v2 带 value/confidence/source。"""
+        """统一偏好写入（Commit 1）：user 级（默认）或 passenger 级，写入 preferences_v2。
+
+        entry 结构：value / source / confidence(可选) / conditions(可选，P2 预留透传)。
+        """
         profile = await self.get_profile(db, user_id)
         v2 = dict(profile.preferences_v2 or {}) if profile else {}
         bucket_key = "passengers" if passenger_id else "user"
@@ -123,6 +193,8 @@ class MemoryService:
         entry = {"value": value, "source": source}
         if confidence is not None:
             entry["confidence"] = float(confidence)
+        if conditions:
+            entry["conditions"] = conditions
         prefs[key] = entry
         if passenger_id:
             bucket[str(passenger_id)] = prefs
@@ -176,7 +248,10 @@ class MemoryService:
         return text
 
     async def distill_preferences(self, db: AsyncSession, user_id: int) -> Optional[dict]:
-        """从最近 Episode 蒸馏结构化偏好到 preferences_v2（Commit 7，无 LLM、幂等）。"""
+        """结构化偏好蒸馏（无 LLM、幂等）：
+        - 按乘客（本人=0 / P_xxx）从最近 Episode 蒸馏 transport / time_window → preferences_v2.passengers；
+        - 从 User L2 价格事件蒸馏 price_sensitivity → preferences_v2.user。
+        """
         res = await db.execute(
             select(TripSummaryRow)
             .where(
@@ -187,17 +262,29 @@ class MemoryService:
             .limit(20)
         )
         episodes = [r.episode_json or {} for r in res.scalars().all()]
-        pref = majority_transport_from_episodes(episodes)
-        if pref:
+        written = {}
+        per_passenger = passenger_preferences_from_episodes(episodes)
+        for pid, prefs in per_passenger.items():
+            for key, meta in prefs.items():
+                await self.update_preference(
+                    db, user_id, key, meta["value"],
+                    passenger_id=pid, confidence=meta.get("confidence"), source=meta.get("source", "distilled"),
+                    conditions=meta.get("conditions"),
+                )
+            written[pid] = {key: meta["value"] for key, meta in prefs.items()}
+
+        price_events = await recent_user_events(
+            db, user_id,
+            (UserEventType.PRICE_DROP_ACCEPTED, UserEventType.PRICE_DROP_IGNORED),
+            limit=100,
+        )
+        sensitivity = price_sensitivity_from_events(price_events)
+        if sensitivity:
             await self.update_preference(
-                db,
-                user_id,
-                "transport",
-                pref["value"],
-                confidence=pref["confidence"],
-                source="distilled",
+                db, user_id, "price_sensitivity", sensitivity["value"],
+                confidence=sensitivity["confidence"], source="distilled",
             )
-        return pref
+        return {"passengers": written, "priceSensitivity": sensitivity["value"] if sensitivity else None}
 
     def _read_previous_conclusion(self, user_id: int) -> str:
         """读取该用户上一轮 L3 偏好结论（供新一轮蒸馏参考，保持长期连续性，不无限追加）。"""
