@@ -218,17 +218,59 @@ async def recent_conversation_turns(
     rows.reverse()
 
     turns = []
+    trace_ids = [r.agent_trace_id for r in rows if r.agent_trace_id]
+    trace_map = {}
+    if trace_ids:
+        from app.models.database import RequestTraceRow
+        t_res = await db.execute(select(RequestTraceRow).where(RequestTraceRow.trace_id.in_(trace_ids)))
+        for t in t_res.scalars().all():
+            trace_map[t.trace_id] = t
+
     for r in rows:
         content = r.content or ""
-        normalized = content.replace("\r", "").replace("\n", " ").strip()
-        summary = normalized if len(normalized) <= 120 else normalized[:120]
-        epoch_ms = int(r.created_at.timestamp() * 1000)
-        turns.append({
+        epoch_ms = int(r.created_at.timestamp() * 1000) if r.created_at else 0
+        resp_type = "ANSWER"
+        if r.role == "assistant":
+            resp_type = "CLARIFY" if r.intent == "CLARIFY_NEEDED" else ("PLAN_RECOMMENDATION" if r.intent == "PLAN_RECOMMENDATION" else "ANSWER")
+
+        display_blocks = []
+        if r.role == "assistant" and r.agent_trace_id and r.agent_trace_id in trace_map:
+            t_row = trace_map[r.agent_trace_id]
+            t_json = t_row.trace_json
+            if isinstance(t_json, str):
+                try:
+                    t_json = json.loads(t_json)
+                except Exception:
+                    pass
+            if isinstance(t_json, dict):
+                events = t_json.get("events", [])
+                for ev in events:
+                    if ev.get("eventType") == "REQUEST_FINISHED" and ev.get("outputPayload"):
+                        try:
+                            payload = json.loads(ev["outputPayload"]) if isinstance(ev["outputPayload"], str) else ev["outputPayload"]
+                            if isinstance(payload, dict):
+                                if "blocks" in payload and payload["blocks"]:
+                                    display_blocks = payload["blocks"]
+                                if payload.get("kind") == "CLARIFY":
+                                    resp_type = "CLARIFY"
+                        except Exception:
+                            pass
+
+        turn = {
+            "id": r.id,
             "role": r.role,
             "intent": r.intent,
-            "content": summary,
+            "content": content,
+            "agent_trace_id": r.agent_trace_id,
+            "responseType": resp_type if r.role == "assistant" else None,
+            "displayBlocks": display_blocks,
             "createdAt": epoch_ms,
-        })
+        }
+        if r.role == "assistant" and (resp_type == "CLARIFY" or r.intent == "CLARIFY_NEEDED"):
+            turn["missingSlots"] = ["transportMode", "budget", "tripDate"]
+            turn["clarifyQuestion"] = content
+
+        turns.append(turn)
     return turns
 
 
