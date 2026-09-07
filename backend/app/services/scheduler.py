@@ -4,13 +4,13 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import order as order_crud
 from app.crud import task as task_crud
 from app.database import async_session_maker
-from app.models.database import TravelOrderRow, TravelTripRow, UserProfileRow
+from app.models.database import DataCacheRow, TravelOrderRow, TravelTripRow, UserProfileRow
 from app.models.enums import OrderStatus, TaskStatus, TaskType
 from app.services.memory import MemoryService
 from app.services.memory_context import monitor_context_from_profile
@@ -21,6 +21,15 @@ from app.services.trace import TraceScope
 from app.services.trace_schema import EventType
 
 log = logging.getLogger("travel.scheduler")
+
+
+async def cleanup_expired_cache(db: AsyncSession) -> int:
+    """删除 data_cache 中已过期行（expire_at 存 UTC，用 UTC_TIMESTAMP 比较）。"""
+    result = await db.execute(
+        delete(DataCacheRow).where(DataCacheRow.expire_at < func.utc_timestamp())
+    )
+    await db.commit()
+    return int(result.rowcount or 0)
 
 
 def price_monitor_enabled(preferences) -> bool:
@@ -63,8 +72,9 @@ class SchedulerService:
         self.scheduler.add_job(self._departure_reminder, IntervalTrigger(minutes=30), id="departure_reminder", max_instances=1, coalesce=True)
         self.scheduler.add_job(self._memory_distill, CronTrigger(hour=23, minute=55), id="memory_distill", max_instances=1, coalesce=True)
         self.scheduler.add_job(self._retry_worker, IntervalTrigger(minutes=1), id="retry_worker", max_instances=1, coalesce=True)
+        self.scheduler.add_job(self._cleanup_data_cache, IntervalTrigger(minutes=60), id="data_cache_cleanup", max_instances=1, coalesce=True)
         self.scheduler.start()
-        log.info("SchedulerService 已启动：price_watch/flight_monitor/departure_reminder/memory_distill/retry_worker")
+        log.info("SchedulerService 已启动：price_watch/flight_monitor/departure_reminder/memory_distill/retry_worker/data_cache_cleanup")
 
     def shutdown(self):
         if self.scheduler.running:
@@ -167,6 +177,16 @@ class SchedulerService:
                     except Exception as e:  # noqa: BLE001
                         log.warning("记忆蒸馏失败 user=%s: %s", row.user_id, e)
                         ctx.record_event("MEMORY_DISTILL_FAILED", "MEMORY", {"userId": row.user_id}, {"error": str(e)[:300]})
+
+    async def _cleanup_data_cache(self):
+        """每小时清理过期 data_cache（读时惰性过期的补位清理，防止残留行累积）。"""
+        async with async_session_maker() as db:
+            try:
+                removed = await cleanup_expired_cache(db)
+                if removed:
+                    log.info("已清理过期 data_cache %s 条", removed)
+            except Exception as e:  # noqa: BLE001
+                log.warning("过期缓存清理失败: %s", e)
 
     async def _retry_worker(self):
         """拉起到期 RETRYING 任务（资金类不自动重试；重试次数超限标记失败）。"""
