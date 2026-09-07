@@ -10,16 +10,34 @@ export interface PlanLeg {
   depart: string
   arrive: string
   price: number
+  seat?: string
+  carrier?: string
+  arrive_day?: number
 }
 
 export interface PlanOption {
-  plan_id: string
-  mode: 'TRAIN' | 'FLIGHT' | 'MIXED'
+  planId?: string
+  plan_id?: string
+  planNo?: number
+  mode?: 'TRAIN' | 'FLIGHT' | 'MIXED'
   legs: PlanLeg[]
-  total_price: number
-  total_duration_h: number
-  score: number
+  totalPrice?: number
+  total_price?: number
+  totalDurationH?: number
+  total_duration_h?: number
+  score?: number
+  meetsBudget?: boolean
   reason?: string
+  summary?: string
+}
+
+export interface OrderBlockItem {
+  orderNo: string
+  type: string
+  status: string
+  price: number
+  tripDate?: string
+  legs?: PlanLeg[]
 }
 
 export interface ClarifySlotOption {

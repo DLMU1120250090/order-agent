@@ -44,7 +44,13 @@
         :feedback-rating="message.feedbackRating"
       />
 
-      <!-- 3. Action Status Card (Order / Booking / Payment) -->
+      <!-- 3. Queried Orders List Card -->
+      <OrderListCard
+        v-if="hasOrders"
+        :orders="message.displayBlocks || []"
+      />
+
+      <!-- 4. Action Status Card (Order / Booking / Payment) -->
       <ActionCard
         v-if="hasAction"
         :order-no="message.orderNo"
@@ -62,6 +68,7 @@ import type { ChatMessage } from '@/types/chat'
 import ClarifyCard from './ClarifyCard.vue'
 import PlanCard from './PlanCard.vue'
 import ActionCard from './ActionCard.vue'
+import OrderListCard from './OrderListCard.vue'
 
 const props = defineProps<{
   message: ChatMessage
@@ -85,14 +92,21 @@ const formattedText = computed(() => {
 })
 
 const hasPlans = computed(() => {
-  return props.message.displayBlocks?.some((b) => b && (b.legs || b.totalPrice !== undefined))
+  return props.message.displayBlocks?.some(
+    (b) => b && !b.orderNo && (b.planId || b.totalPrice !== undefined || b.score !== undefined)
+  )
+})
+
+const hasOrders = computed(() => {
+  return props.message.displayBlocks?.some((b) => b && b.orderNo && b.status)
 })
 
 const hasAction = computed(() => {
   return (
-    Boolean(props.message.orderNo) ||
-    Boolean(props.message.taskId) ||
-    props.message.responseType === 'TASK_PROGRESS'
+    !hasOrders.value &&
+    (Boolean(props.message.orderNo) ||
+      Boolean(props.message.taskId) ||
+      props.message.responseType === 'TASK_PROGRESS')
   )
 })
 </script>

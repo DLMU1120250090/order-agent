@@ -61,12 +61,15 @@ export const useChatStore = defineStore('chat', () => {
       const history = await chatApi.sessionMessages(targetSessionId, 50)
       if (Array.isArray(history) && history.length > 0) {
         messages.value = history.map((item, idx) => ({
-          id: `msg_hist_${idx}_${Date.now()}`,
+          id: item.id ? `msg_hist_${item.id}` : `msg_hist_${idx}_${Date.now()}`,
           role: item.role === 'user' ? 'user' : 'assistant',
           text: item.content || item.text || '',
-          timestamp: item.created_at || (item.createdAt ? new Date(item.createdAt).toLocaleTimeString() : new Date().toLocaleTimeString()),
-          displayBlocks: item.display_blocks || item.displayBlocks || [],
+          timestamp: item.createdAt ? new Date(item.createdAt).toLocaleTimeString() : (item.created_at || new Date().toLocaleTimeString()),
+          displayBlocks: item.displayBlocks || item.display_blocks || [],
           traceId: item.agent_trace_id || item.traceId,
+          responseType: item.responseType || (item.intent === 'CLARIFY_NEEDED' ? 'CLARIFY' : (item.intent === 'PLAN_RECOMMENDATION' ? 'PLAN_RECOMMENDATION' : 'ANSWER')),
+          missingSlots: item.missingSlots || (item.intent === 'CLARIFY_NEEDED' ? ['transportMode', 'budget', 'tripDate'] : []),
+          clarifyQuestion: item.clarifyQuestion || (item.intent === 'CLARIFY_NEEDED' ? (item.content || item.text) : undefined),
         }))
 
         // Restore latest traceId if any

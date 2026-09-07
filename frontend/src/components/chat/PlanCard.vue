@@ -21,33 +21,52 @@
           <div class="plan-tag">
             <span class="plan-no">方案 {{ String.fromCharCode(65 + idx) }}</span>
             <span v-if="idx === 0" class="best-badge">首选推荐</span>
+            <el-tag v-if="plan.meetsBudget" type="success" size="small" effect="light" class="meta-pill">
+              符合预算
+            </el-tag>
+            <el-tag v-if="plan.score" type="info" size="small" effect="plain" class="meta-pill">
+              推荐度 {{ Math.round(plan.score * 100) }}%
+            </el-tag>
           </div>
-          <div class="plan-price">
-            <span class="price-symbol">¥</span>
-            <span class="price-val">{{ plan.totalPrice }}</span>
+          <div class="plan-price-block">
+            <span v-if="plan.totalDurationH" class="duration-tag">约 {{ plan.totalDurationH }}h</span>
+            <div class="price-wrap">
+              <span class="price-symbol">¥</span>
+              <span class="price-val">{{ plan.totalPrice ?? '-' }}</span>
+            </div>
           </div>
         </div>
 
         <!-- Legs Segment -->
         <div v-if="plan.legs && plan.legs.length > 0" class="legs-list">
           <div v-for="(leg, legIdx) in plan.legs" :key="legIdx" class="leg-item">
-            <div class="leg-vehicle">
-              <el-tag
-                size="small"
-                :type="leg.mode === 'FLIGHT' ? 'warning' : 'primary'"
-                effect="light"
-                class="vehicle-tag"
-              >
-                {{ leg.vehicle_no || leg.mode }}
-              </el-tag>
+            <!-- Leg Info Subbar -->
+            <div class="leg-subbar">
+              <div class="leg-badges">
+                <el-tag
+                  size="small"
+                  :type="leg.mode === 'FLIGHT' ? 'warning' : 'primary'"
+                  effect="light"
+                  class="vehicle-tag"
+                >
+                  {{ leg.mode === 'FLIGHT' ? '✈' : '🚄' }} {{ leg.vehicle_no || leg.mode }}
+                </el-tag>
+                <span v-if="leg.carrier" class="carrier-text">{{ leg.carrier }}</span>
+                <el-tag v-if="leg.seat" size="small" type="info" effect="plain" class="seat-tag">
+                  {{ leg.seat }}
+                </el-tag>
+              </div>
+              <span v-if="leg.price" class="leg-price-text">票价 ¥{{ leg.price }}</span>
             </div>
+
+            <!-- Route stations and times -->
             <div class="leg-route">
               <div class="station-time">
                 <span class="time">{{ leg.depart }}</span>
                 <span class="station">{{ leg.from_station || leg.from_city }}</span>
               </div>
               <div class="route-arrow">
-                <span class="duration">{{ plan.totalDurationH }}h</span>
+                <span v-if="leg.arrive_day && leg.arrive_day > 1" class="overnight-badge">+{{ leg.arrive_day - 1 }}天</span>
                 <div class="arrow-line"></div>
               </div>
               <div class="station-time text-right">
@@ -161,7 +180,7 @@ const selectedDislikeReason = ref('价格超出预期')
 
 const plans = computed(() => {
   if (!Array.isArray(props.blocks)) return []
-  return props.blocks.filter((b) => b && (b.legs || b.totalPrice !== undefined))
+  return props.blocks.filter((b) => b && !b.orderNo && (b.planId || b.totalPrice !== undefined || b.score !== undefined))
 })
 
 function selectThisPlan(planNo: number) {
@@ -261,7 +280,8 @@ function confirmDislikeFeedback() {
 .plan-tag {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .plan-no {
@@ -279,13 +299,36 @@ function confirmDislikeFeedback() {
   font-weight: 600;
 }
 
-.plan-price {
+.meta-pill {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.plan-price-block {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.duration-tag {
+  font-size: 11px;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.price-wrap {
   color: #ea580c;
   font-weight: 700;
+  display: flex;
+  align-items: baseline;
 }
 
 .price-symbol {
   font-size: 12px;
+  margin-right: 1px;
 }
 
 .price-val {
@@ -294,9 +337,56 @@ function confirmDislikeFeedback() {
 
 .leg-item {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: 6px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 10px;
   margin-bottom: 8px;
+}
+
+.leg-subbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed #f1f5f9;
+}
+
+.leg-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vehicle-tag {
+  font-weight: 600;
+}
+
+.carrier-text {
+  font-size: 11px;
+  color: #475569;
+}
+
+.seat-tag {
+  font-size: 10.5px;
+}
+
+.leg-price-text {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #f97316;
+}
+
+.overnight-badge {
+  font-size: 9.5px;
+  color: #ef4444;
+  font-weight: 700;
+  background: #fef2f2;
+  padding: 0 3px;
+  border-radius: 3px;
+  margin-bottom: 1px;
 }
 
 .leg-route {
