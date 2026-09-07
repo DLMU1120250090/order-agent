@@ -4,9 +4,12 @@
 """
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from app.services.evaluation import EvaluationService
-from app.services.trace import TraceContext
+from app.services.trace import TraceContext, TraceScope
 from app.services.trace_schema import EventType, TraceEventSchema
 
 
@@ -101,3 +104,26 @@ def test_evaluation_parses_old_trace_without_regression():
     assert snapshot["slots"]["destination"] == ["上海"]
     assert snapshot["clarifyAction"] == "READY"
     assert snapshot["planRanked"] is True
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_trace_scope_set_task_id_dynamic():
+    mock_db = AsyncMock()
+    mock_db.add = MagicMock()
+    async with TraceScope(mock_db, "", 1, run_id="test_run") as ctx:
+        ctx.set_task_id("task_dynamic_123")
+        ctx.record_event(EventType.TASK_CREATED, "TASK", {"foo": "bar"}, {})
+
+    assert mock_db.add.called
+    saved_row = mock_db.add.call_args[0][0]
+    assert saved_row.task_id == "task_dynamic_123"
+    assert saved_row.trace_json["taskId"] == "task_dynamic_123"
+    assert saved_row.trace_json["events"][0]["taskId"] == "task_dynamic_123"
+    assert saved_row.status == "SUCCESS"
+
+

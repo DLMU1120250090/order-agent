@@ -131,6 +131,11 @@ class TraceContext:
         self.error_message: Optional[str] = None
         self.start_time_ns = time.time_ns()
         self.step_counter = 0
+        self.task_id: Optional[str] = None
+
+    def set_task_id(self, task_id: Optional[str]):
+        """任务创建后回填 task_id（scheduler 先建 scope 再建 task 的场景）。"""
+        self.task_id = task_id
 
     def next_step(self) -> int:
         """步骤序号累加器"""
@@ -320,11 +325,14 @@ class TraceScope:
         self.task_id = task_id
         self.trace_id = f"trace_{uuid.uuid4().hex}"
         self.context = TraceContext(self.trace_id, self.session_id, self.user_id)
+        if task_id:
+            self.context.set_task_id(task_id)
         self.token = None
 
     def set_task_id(self, task_id: Optional[str]):
         """任务创建后回填 task_id（scheduler 先建 scope 再建 task 的场景）。"""
         self.task_id = task_id
+        self.context.set_task_id(task_id)
 
     async def __aenter__(self) -> TraceContext:
         # 将当前请求的 TraceContext 塞入协程变量中，并保留还原 Token
@@ -343,19 +351,20 @@ class TraceScope:
             self.context.record_error(EventType.REQUEST_FAILED, "HTTP", {}, exc_val)
 
         # Commit 5：事件级注入 runId/taskId（老事件无这些字段，不覆盖既有值）
+        effective_task_id = self.context.task_id or self.task_id
         events = [e.to_dict() for e in self.context.events]
         for ev in events:
             if self.run_id and "runId" not in ev:
                 ev["runId"] = self.run_id
-            if self.task_id and "taskId" not in ev:
-                ev["taskId"] = self.task_id
+            if effective_task_id and "taskId" not in ev:
+                ev["taskId"] = effective_task_id
 
         trace_json = {
             "traceId": self.trace_id,
             "sessionId": self.session_id,
             "userId": self.user_id,
             "runId": self.run_id,
-            "taskId": self.task_id,
+            "taskId": effective_task_id,
             "status": self.context.status,
             "durationMs": duration_ms,
             "events": events,
@@ -371,7 +380,7 @@ class TraceScope:
             duration_ms=duration_ms,
             error_message=self.context.error_message,
             run_id=self.run_id,
-            task_id=self.task_id,
+            task_id=effective_task_id,
             trace_json=trace_json,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
