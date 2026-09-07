@@ -21,6 +21,9 @@ FastAPI · LangChain · Playwright · APScheduler · MySQL/SQLModel · 钉钉开
 
 项目分为 `backend/`（FastAPI）与 `frontend/`（Vue3 + Vite），本机可用 nginx（`nginx-1.30.4/`）组合演示。
 
+> **一键启动（本机演示）**：双击根目录 `start_services.bat`（或执行 `start_services.bat --no-browser`）。
+> 脚本会启动后端（8000）与 nginx（80，已在运行则跳过），并打开 <http://127.0.0.1>。
+
 ### 1. 后端
 
 ```bash
