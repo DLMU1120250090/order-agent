@@ -718,7 +718,8 @@ class TravelOrchestratorService:
             blocks=blocks,
         )
         ctx.record_event("ORDER_QUERIED", "ORDER", {"userId": user_id}, {"count": len(orders)})
-        return self._finish(db, state, ctx, msg)
+        new_state = state.model_copy(update={"currentIntent": Intent.ORDER_QUERY})
+        return self._finish(db, new_state, ctx, msg)
 
     async def _handle_trip_query(self, db: AsyncSession, user_id: int, state: SessionState, ctx: TraceContext) -> OutboundMessage:
         """查行程：展示行程单（车次/站点/时刻），与订单列表区分开。"""
@@ -762,7 +763,8 @@ class TravelOrchestratorService:
                 blocks=blocks,
             )
             ctx.record_event("TRIP_QUERIED", "TRIP", {"userId": user_id}, {"count": len(items), "orders": [o.order_no for o in items]})
-            return self._finish(db, state, ctx, msg)
+            new_state = state.model_copy(update={"currentIntent": Intent.ORDER_QUERY})
+            return self._finish(db, new_state, ctx, msg)
 
         # 无有效订单：回退当前会话已选方案
         if state.selectedPlanId:
