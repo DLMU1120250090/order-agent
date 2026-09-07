@@ -41,10 +41,10 @@ class MockDataSource:
             return []
         seed = self._seed(origin, destination)
         out = []
-        for i in range(4):
-            s = seed + i * 7
-            depart_h = 6 + (s % 14)
-            duration_h = 3 + (s % 5)
+        # 测试用：每城市对生成 10 条，公式保证车次号唯一、时刻/票价互不重复
+        for i in range(10):
+            depart_h = 6 + (seed + i) % 14
+            duration_h = 3 + (seed + i * 7) % 5
             arrive_h = depart_h + duration_h
             out.append({
                 "mode": "TRAIN",
@@ -55,10 +55,10 @@ class MockDataSource:
                 "arrive_day": 1,
                 "depart": f"{depart_h:02d}:00",
                 "arrive": f"{arrive_h % 24:02d}:00",
-                "price": float(180 + (s % 460)),
-                "vehicle_no": f"G{1000 + (s % 8000)}",
+                "price": float(180 + (seed * 7 + i * 97) % 460),
+                "vehicle_no": f"G{1000 + (seed + i * 97) % 8000}",
                 "seat": "二等座",
-                "remaining": 10 + (s % 90),
+                "remaining": 10 + (seed + i * 13) % 90,
             })
         return out
 
@@ -67,10 +67,10 @@ class MockDataSource:
             return []
         seed = self._seed(origin, destination)
         out = []
-        for i in range(4):
-            s = seed + i * 11
-            depart_h = 7 + (s % 13)
-            duration_h = 1 + (s % 3)
+        # 测试用：每城市对生成 10 条，公式保证航班号唯一、时刻/票价互不重复
+        for i in range(10):
+            depart_h = 7 + (seed + i) % 13
+            duration_h = 1 + (seed + i * 7) % 3
             arrive_h = depart_h + duration_h
             out.append({
                 "mode": "FLIGHT",
@@ -81,10 +81,10 @@ class MockDataSource:
                 "arrive_day": 1,
                 "depart": f"{depart_h:02d}:00",
                 "arrive": f"{arrive_h % 24:02d}:00",
-                "price": float(180 + (s % 340)),
-                "vehicle_no": f"{MOCK_AIRLINES[s % len(MOCK_AIRLINES)]}{s % 9000 + 1000}",
+                "price": float(180 + (seed * 7 + i * 97) % 340),
+                "vehicle_no": f"{MOCK_AIRLINES[(seed + i) % len(MOCK_AIRLINES)]}{1000 + (seed + i * 97) % 9000}",
                 "seat": "经济舱",
-                "remaining": 5 + (s % 120),
+                "remaining": 5 + (seed + i * 13) % 120,
             })
         return out
 
