@@ -12,7 +12,8 @@ __pycache__/
 
 # 运行时产物（启动时自动创建）
 logs/
-memory/
+/memory/
+backend/memory/
 *.log
 
 # 本地历史与编辑器
