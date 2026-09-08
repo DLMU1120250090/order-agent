@@ -45,6 +45,7 @@
               <el-icon v-if="stage.status === 'SUCCESS'"><Check /></el-icon>
               <el-icon v-else-if="stage.status === 'RUNNING'" class="is-loading"><Loading /></el-icon>
               <el-icon v-else-if="stage.status === 'FAILED'"><Close /></el-icon>
+              <el-icon v-else-if="stage.status === 'SKIPPED'"><Minus /></el-icon>
               <span v-else class="step-num">{{ index + 1 }}</span>
             </div>
             <div v-if="index < runtimeStore.pipelineStages.length - 1" class="connector-line"></div>
@@ -61,8 +62,8 @@
                 <span v-if="stage.latencyMs > 0" class="latency-badge">
                   {{ stage.latencyMs }} ms
                 </span>
-                <span class="status-tag" :class="stage.status.toLowerCase()">
-                  {{ stageStatusLabel(stage.status) }}
+                <span class="status-tag" :class="[stage.status.toLowerCase(), { waiting: stage.id === 'stage-3' && isClarifying }]">
+                  {{ stageStatusLabel(stage.status, stage.id) }}
                 </span>
               </div>
             </div>
@@ -83,23 +84,65 @@ import { useRuntimeStore, type PipelineStage } from '@/stores/runtime'
 
 const runtimeStore = useRuntimeStore()
 
+function parsePayload(val: any): any {
+  if (!val) return null
+  if (typeof val === 'object') return val
+  if (typeof val === 'string') {
+    try {
+      return JSON.parse(val)
+    } catch {
+      return val
+    }
+  }
+  return val
+}
+
+const isClarifying = computed(() => {
+  const evs = runtimeStore.events
+  const clarifyEv = evs.find(e => e.eventType === 'CLARIFY_DECISION')
+  if (clarifyEv) {
+    const out = parsePayload(clarifyEv.outputPayload) || clarifyEv.decision || {}
+    if (out.action === 'ASK') return true
+  }
+  const respReady = evs.find(e => e.eventType === 'RESPONSE_READY')
+  if (respReady && (respReady.phase === 'CLARIFY' || respReady.phase === 'MEMORY_CONFIRM')) {
+    return true
+  }
+  return false
+})
+
 const overallStatusClass = computed(() => {
   if (!runtimeStore.traceDetail) return 'pending'
   const stages = runtimeStore.pipelineStages
   if (stages.some(s => s.status === 'FAILED')) return 'failed'
+  if (runtimeStore.isOrderPaid) return 'success'
+  if (runtimeStore.isWaitingPayment) return 'waiting'
   if (stages.some(s => s.status === 'RUNNING')) return 'running'
-  return 'success'
+  if (isClarifying.value) return 'waiting'
+  const evs = runtimeStore.events
+  if (evs.some(e => e.eventType === 'ORDER_QUERIED' || e.eventType === 'TRIP_QUERIED')) return 'success'
+  if (stages.some(s => s.id === 'stage-3' && s.status === 'SUCCESS')) return 'success'
+  if (stages.some(s => s.id === 'stage-4' && s.status === 'SUCCESS')) return 'success'
+  return 'pending'
 })
 
 const overallStatusText = computed(() => {
   if (!runtimeStore.traceDetail) return '就绪待命'
   const stages = runtimeStore.pipelineStages
   if (stages.some(s => s.status === 'FAILED')) return '执行异常'
+  if (runtimeStore.isOrderPaid) return '出票完成'
+  if (runtimeStore.isWaitingPayment) return '等待支付'
   if (stages.some(s => s.status === 'RUNNING')) return '规划流转中'
-  return '规划成功'
+  if (isClarifying.value) return '等待用户确认'
+  const evs = runtimeStore.events
+  if (evs.some(e => e.eventType === 'ORDER_QUERIED')) return '查询完成'
+  if (evs.some(e => e.eventType === 'TRIP_QUERIED')) return '行程已导出'
+  if (stages.some(s => s.id === 'stage-3' && s.status === 'SUCCESS')) return '规划成功'
+  if (stages.some(s => s.id === 'stage-4' && s.status === 'SUCCESS')) return '履约就绪'
+  return '就绪待命'
 })
 
-function stageStatusLabel(status: PipelineStage['status']): string {
+function stageStatusLabel(status: PipelineStage['status'], stageId?: string): string {
   switch (status) {
     case 'SUCCESS':
       return '已完成'
@@ -107,8 +150,11 @@ function stageStatusLabel(status: PipelineStage['status']): string {
       return '执行中'
     case 'FAILED':
       return '失败'
+    case 'SKIPPED':
+      return '无需规划'
     case 'PENDING':
     default:
+      if (stageId === 'stage-3' && isClarifying.value) return '待确认'
       return '待触发'
   }
 }
@@ -174,6 +220,17 @@ function stageStatusLabel(status: PipelineStage['status']): string {
 .status-pill.pending {
   background: #f1f5f9;
   color: #64748b;
+}
+
+.status-pill.waiting {
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+
+.status-pill.waiting .pill-dot {
+  background: #f59e0b;
+  animation: pulse-dot 1.5s infinite;
 }
 
 .pill-dot {
@@ -292,6 +349,12 @@ function stageStatusLabel(status: PipelineStage['status']): string {
   color: #94a3b8;
 }
 
+.status-skipped .node-icon {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1.5px dashed #cbd5e1;
+}
+
 .step-num {
   font-size: 11px;
 }
@@ -304,7 +367,8 @@ function stageStatusLabel(status: PipelineStage['status']): string {
   min-height: 24px;
 }
 
-.status-success .connector-line {
+.status-success .connector-line,
+.status-skipped .connector-line {
   background: #86efac;
 }
 
@@ -387,9 +451,21 @@ function stageStatusLabel(status: PipelineStage['status']): string {
   color: #b91c1c;
 }
 
+.status-tag.skipped {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #cbd5e1;
+}
+
 .status-tag.pending {
   background: #f1f5f9;
   color: #94a3b8;
+}
+
+.status-tag.waiting {
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
 }
 
 .stage-body {

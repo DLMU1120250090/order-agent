@@ -74,6 +74,8 @@ export const useChatStore = defineStore('chat', () => {
           missingSlots: item.missingSlots || [],
           confirmFields: item.confirmFields || [],
           clarifyQuestion: item.clarifyQuestion || (item.intent === 'CLARIFY_NEEDED' ? (item.content || item.text) : undefined),
+          orderNo: item.orderNo || item.order_no,
+          taskId: item.taskId || item.task_id,
         }))
 
         // Restore latest traceId if any
@@ -297,16 +299,27 @@ export const useChatStore = defineStore('chat', () => {
   function handleSSEMessage(data: any) {
     if (!data) return
 
-    // 1. Task progress update
-    if (data.kind === 'TASK_PROGRESS' || data.task_progress) {
+    // 1. Task progress & Payment confirmed updates
+    if (data.kind === 'TASK_PROGRESS' || data.task_progress || data.kind === 'CARD') {
       const progress = data.task_progress || data
-      const taskId = progress.taskId || data.taskId
+      const taskId = progress.taskId || data.taskId || data.correlationId
+      const orderNo = progress.orderNo || data.orderNo || (data.blocks?.[0]?.orderNo)
       if (taskId) {
         activeTaskId.value = taskId
       }
-      const matched = messages.value.slice().reverse().find((m) => m.taskId === taskId)
+      const matched = messages.value.slice().reverse().find(
+        (m) => (taskId && m.taskId === taskId) || (orderNo && m.orderNo === orderNo)
+      )
       if (matched) {
-        matched.text = progress.message || progress.step || matched.text
+        if (data.text || progress.message || progress.step) {
+          matched.text = data.text || progress.message || progress.step || matched.text
+        }
+        if (orderNo && !matched.orderNo) {
+          matched.orderNo = orderNo
+        }
+        if (data.blocks && data.blocks.length > 0) {
+          matched.displayBlocks = data.blocks
+        }
         if (progress.status) {
           matched.responseType = 'TASK_PROGRESS'
         }
@@ -317,26 +330,33 @@ export const useChatStore = defineStore('chat', () => {
           text: data.text,
           timestamp: new Date().toLocaleTimeString(),
           taskId: taskId,
+          orderNo: orderNo,
           responseType: 'TASK_PROGRESS',
+          displayBlocks: data.blocks || [],
         })
       }
     }
 
-    // 2. Image (Payment QR Code push)
+    // 2. Image (Payment QR Code push - fallback for non-web channels without card)
     if (data.kind === 'IMAGE' || data.image_path) {
-      messages.value.push({
-        id: `msg_sse_img_${Date.now()}`,
-        role: 'assistant',
-        text: data.text || '支付二维码已送达：',
-        timestamp: new Date().toLocaleTimeString(),
-        displayBlocks: [
-          {
-            type: 'IMAGE',
-            imagePath: data.image_path || '/media/qr_code.jpg',
-            title: data.text || '支付二维码',
-          },
-        ],
-      })
+      const taskId = data.correlation_id || data.correlationId
+      const hasActiveCard = messages.value.some((m) => taskId && m.taskId === taskId)
+      // 如果当前会话已存在该任务的 ActionCard，避免生成多余的纯文本气泡
+      if (!hasActiveCard) {
+        messages.value.push({
+          id: `msg_sse_img_${Date.now()}`,
+          role: 'assistant',
+          text: data.text || '支付二维码已送达：',
+          timestamp: new Date().toLocaleTimeString(),
+          displayBlocks: [
+            {
+              type: 'IMAGE',
+              imagePath: data.image_path || '/media/qr_code.jpg',
+              title: data.text || '支付二维码',
+            },
+          ],
+        })
+      }
     }
 
     // 3. Price drop alert

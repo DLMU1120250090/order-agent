@@ -9,7 +9,43 @@
     <div v-if="computedSlotGroups.length > 0" class="slot-groups">
       <div v-for="group in computedSlotGroups" :key="group.slot" class="slot-group">
         <span class="slot-label">{{ group.label }}：</span>
-        <div class="pill-tags">
+        <!-- 专属：乘车人多选框组 (Passenger Multi-Select Checkboxes) -->
+        <div v-if="group.slot === 'passengers'" class="passenger-checkbox-container">
+          <div class="passenger-checkbox-list">
+            <div
+              v-for="p in allPassengers"
+              :key="p.passenger_id || p.name"
+              class="passenger-check-chip"
+              :class="{ selected: isPassengerSelected(p) }"
+              @click="togglePassenger(p)"
+            >
+              <div class="checkbox-box">
+                <el-icon v-if="isPassengerSelected(p)" class="check-icon"><Check /></el-icon>
+              </div>
+              <span class="p-role-icon">{{ p.role === 'self' || String(p.passenger_id) === '0' ? '👤' : '👥' }}</span>
+              <span class="p-name">{{ p.name || (p.role === 'self' ? '本人' : '乘客') }}</span>
+              <span v-if="p.role === 'self' || String(p.passenger_id) === '0'" class="p-self-badge">本人</span>
+            </div>
+
+            <!-- 现场快捷新增乘车人 -->
+            <button
+              type="button"
+              class="add-passenger-chip"
+              @click="showPassengerModal = true"
+            >
+              <el-icon class="add-icon"><Plus /></el-icon>
+              <span>添加新乘车人</span>
+            </button>
+          </div>
+
+          <!-- 已选乘车人动态小提示 -->
+          <div v-if="selectedPassengersSummary.length > 0" class="passenger-selection-tip">
+            <span>已选 <strong>{{ selectedPassengersSummary.length }}</strong> 位乘车人：{{ selectedPassengersSummary.join('、') }}</span>
+          </div>
+        </div>
+
+        <!-- 通用单选胶囊标签组 (交通偏好、预算范围、出行风格等) -->
+        <div v-else class="pill-tags">
           <el-tooltip
             v-for="opt in group.options"
             :key="opt.label"
@@ -27,17 +63,6 @@
               {{ opt.label }}
             </button>
           </el-tooltip>
-
-          <!-- 乘车人快速新增按钮 -->
-          <button
-            v-if="group.slot === 'passengers'"
-            type="button"
-            class="pill-tag add-passenger-pill"
-            @click="showPassengerModal = true"
-          >
-            <el-icon class="add-icon"><Plus /></el-icon>
-            <span>添加新乘车人</span>
-          </button>
         </div>
       </div>
     </div>
@@ -67,7 +92,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
-import { Warning, Plus } from '@element-plus/icons-vue'
+import { Warning, Plus, Check } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
 import { useMemoryStore } from '@/stores/memory'
 import PassengerModal from './PassengerModal.vue'
@@ -93,7 +118,7 @@ const props = defineProps<{
 const chatStore = useChatStore()
 const memoryStore = useMemoryStore()
 const selectedSlots = reactive<Record<string, string>>({})
-const selectedPassengers = ref<string[]>([])
+const selectedPassengerIds = ref<string[]>([])
 const showPassengerModal = ref(false)
 
 onMounted(() => {
@@ -102,15 +127,69 @@ onMounted(() => {
   }
 })
 
+const allPassengers = computed(() => {
+  const list = memoryStore.profile?.passengers || []
+  if (list.length === 0) {
+    return [{ passenger_id: '0', name: '本人', role: 'self' }]
+  }
+  return [...list].sort((a, b) => {
+    const aSelf = a.role === 'self' || String(a.passenger_id) === '0'
+    const bSelf = b.role === 'self' || String(b.passenger_id) === '0'
+    if (aSelf && !bSelf) return -1
+    if (!aSelf && bSelf) return 1
+    return 0
+  })
+})
+
+function isPassengerSelected(p: any): boolean {
+  const pid = String(p.passenger_id ?? '0')
+  return selectedPassengerIds.value.includes(pid)
+}
+
+function togglePassenger(p: any) {
+  const pid = String(p.passenger_id ?? '0')
+  const idx = selectedPassengerIds.value.indexOf(pid)
+  if (idx >= 0) {
+    selectedPassengerIds.value.splice(idx, 1)
+  } else {
+    selectedPassengerIds.value.push(pid)
+  }
+  syncPassengerSlot()
+}
+
+function syncPassengerSlot() {
+  const names: string[] = []
+  for (const pid of selectedPassengerIds.value) {
+    const target = allPassengers.value.find((x) => String(x.passenger_id ?? '0') === pid)
+    if (target) {
+      const isSelf = target.role === 'self' || String(target.passenger_id) === '0'
+      names.push(isSelf ? `${target.name || '本人'}(本人)` : (target.name || '乘客'))
+    }
+  }
+  if (names.length > 0) {
+    selectedSlots['passengers'] = names.join('、')
+  } else {
+    delete selectedSlots['passengers']
+  }
+}
+
+const selectedPassengersSummary = computed(() => {
+  const names: string[] = []
+  for (const pid of selectedPassengerIds.value) {
+    const target = allPassengers.value.find((x) => String(x.passenger_id ?? '0') === pid)
+    if (target) {
+      const isSelf = target.role === 'self' || String(target.passenger_id) === '0'
+      names.push(isSelf ? `${target.name || '本人'}(本人)` : (target.name || '乘客'))
+    }
+  }
+  return names
+})
+
 const presetSlotGroups: SlotGroupItem[] = [
   {
     slot: 'passengers',
     label: '乘车人员',
-    options: [
-      { label: '👤 本人出行 (1人)', value: '本人出行 (1人)', tip: '当前登录账号本人出行，预订 1 张票' },
-      { label: '👥 2人同行', value: '2人同行', tip: '双人同行，如本人与伴侣或朋友' },
-      { label: '👨‍👩‍👧 家庭/多人 (3人+)', value: '家庭/多人', tip: '3人及以上结伴出游或家庭出行' },
-    ],
+    options: [],
   },
   {
     slot: 'transportMode',
@@ -208,52 +287,18 @@ const visibleSlotGroups = computed(() => {
 
 const computedSlotGroups = computed(() => {
   return visibleSlotGroups.value.map((g) => {
-    if (g.slot !== 'passengers') return g
-    const baseOptions = [...g.options]
-    const registered = memoryStore.profile?.passengers || []
-    const extraOptions: OptionItem[] = []
-    for (const p of registered) {
-      const pName = p.name || (p.role === 'self' ? '本人' : '乘客')
-      const isSelf = p.role === 'self' || String(p.passenger_id) === '0'
-      const label = isSelf ? `👤 ${pName}(本人)` : `🏷️ ${pName}`
-      if (!baseOptions.some((b) => b.value === pName)) {
-        extraOptions.push({
-          label,
-          value: pName,
-          tip: `证件号: ${p.id_no ? p.id_no.slice(0, 6) + '******' + p.id_no.slice(-4) : '已登记'} (${isSelf ? '本人' : '同行人'})`,
-        })
-      }
+    if (g.slot === 'passengers') {
+      return { ...g, options: [] }
     }
-    return {
-      ...g,
-      options: [...baseOptions, ...extraOptions],
-    }
+    return g
   })
 })
 
 function isOptionActive(slot: string, val: string): boolean {
-  if (slot === 'passengers') {
-    return selectedPassengers.value.includes(val)
-  }
   return selectedSlots[slot] === val
 }
 
 function selectOption(slot: string, val: string) {
-  if (slot === 'passengers') {
-    const idx = selectedPassengers.value.indexOf(val)
-    if (idx >= 0) {
-      selectedPassengers.value.splice(idx, 1)
-    } else {
-      selectedPassengers.value.push(val)
-    }
-    if (selectedPassengers.value.length > 0) {
-      selectedSlots['passengers'] = selectedPassengers.value.join('、')
-    } else {
-      delete selectedSlots['passengers']
-    }
-    return
-  }
-
   if (selectedSlots[slot] === val) {
     delete selectedSlots[slot]
   } else {
@@ -261,11 +306,21 @@ function selectOption(slot: string, val: string) {
   }
 }
 
-function handlePassengerSaved(p: any) {
-  const name = p.name
-  if (!selectedPassengers.value.includes(name)) {
-    selectedPassengers.value.push(name)
-    selectedSlots['passengers'] = selectedPassengers.value.join('、')
+async function handlePassengerSaved(p: any) {
+  await memoryStore.fetchProfile()
+  if (p && p.passenger_id) {
+    const pid = String(p.passenger_id)
+    if (!selectedPassengerIds.value.includes(pid)) {
+      selectedPassengerIds.value.push(pid)
+      syncPassengerSlot()
+    }
+  } else if (p && p.name) {
+    const found = (memoryStore.profile?.passengers || []).find((x) => x.name === p.name)
+    const pid = found ? String(found.passenger_id) : '0'
+    if (!selectedPassengerIds.value.includes(pid)) {
+      selectedPassengerIds.value.push(pid)
+      syncPassengerSlot()
+    }
   }
 }
 
@@ -371,6 +426,126 @@ function confirmClarify() {
 
 .add-icon {
   font-size: 11px;
+}
+
+/* 专属乘车人多选框组样式 */
+.passenger-checkbox-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.passenger-checkbox-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.passenger-check-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #334155;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.passenger-check-chip:hover {
+  background: #f8fafc;
+  border-color: #93c5fd;
+  transform: translateY(-1px);
+}
+
+.passenger-check-chip.selected {
+  background: #eff6ff;
+  border-color: #2563eb;
+  color: #1d4ed8;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(37, 99, 235, 0.12);
+}
+
+.checkbox-box {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1.5px solid #cbd5e1;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.passenger-check-chip.selected .checkbox-box {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+.check-icon {
+  font-size: 10px;
+  color: #ffffff;
+}
+
+.p-role-icon {
+  font-size: 12px;
+}
+
+.p-name {
+  font-size: 12px;
+  color: #1e293b;
+}
+
+.passenger-check-chip.selected .p-name {
+  color: #1d4ed8;
+}
+
+.p-self-badge {
+  font-size: 10px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.add-passenger-chip {
+  background: #ecfdf5;
+  border: 1.5px dashed #10b981;
+  color: #047857;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.add-passenger-chip:hover {
+  background: #d1fae5;
+  border-color: #059669;
+  color: #065f46;
+  transform: translateY(-1px);
+}
+
+.passenger-selection-tip {
+  font-size: 11.5px;
+  color: #b45309;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .clarify-actions {

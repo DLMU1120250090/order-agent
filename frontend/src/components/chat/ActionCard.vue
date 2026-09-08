@@ -9,7 +9,7 @@
       <span v-if="orderNo" class="order-no">订单号: {{ orderNo }}</span>
     </div>
 
-    <!-- Step Progress Bar -->
+    <!-- Step Progress Bar (4 steps) -->
     <div class="steps-progress">
       <div class="step-node" :class="{ completed: step >= 1, active: step === 1 }">
         <div class="node-circle">1</div>
@@ -25,19 +25,27 @@
         <div class="node-circle">3</div>
         <span class="node-text">待支付</span>
       </div>
+      <div class="step-connector" :class="{ active: step >= 4 }"></div>
+      <div class="step-node" :class="{ completed: step >= 4, active: step === 4 }">
+        <div class="node-circle">
+          <el-icon v-if="step >= 4"><Check /></el-icon>
+          <span v-else>4</span>
+        </div>
+        <span class="node-text">出票完成</span>
+      </div>
     </div>
 
     <!-- Status Message -->
-    <div class="status-box">
+    <div class="status-box" :class="{ 'status-box-success': step >= 4 }">
       <div class="status-indicator">
-        <span class="pulse-dot"></span>
+        <span class="pulse-dot" :class="{ 'dot-success': step >= 4 }"></span>
         <span class="status-title">{{ statusTitle }}</span>
       </div>
       <p class="status-desc">{{ statusDesc }}</p>
     </div>
 
-    <!-- QR Code / Checkout Preview -->
-    <div v-if="hasQrCode || step >= 2" class="checkout-preview">
+    <!-- QR Code / Checkout Preview (Only shown when waiting for payment) -->
+    <div v-if="step === 3" class="checkout-preview">
       <div class="qr-wrapper">
         <img
           :src="qrImageUrl"
@@ -50,25 +58,42 @@
           <span class="qr-tip-sub">支持本人支付 · Agent 绝不代付</span>
         </div>
       </div>
+      <div class="payment-hint">
+        <el-icon class="hint-icon"><InfoFilled /></el-icon>
+        <span>支付后点击下方<strong>「我已完成支付」</strong>或直接回复<strong>「付好了」</strong>即可出票</span>
+      </div>
+    </div>
+
+    <!-- Success Preview (Step 4 Paid) -->
+    <div v-else-if="step >= 4" class="success-preview">
+      <div class="success-badge-inner">
+        <el-icon class="success-icon"><CircleCheckFilled /></el-icon>
+        <div class="success-text-wrap">
+          <div class="success-main">Mock 供应商已出票完成</div>
+          <div class="success-sub">出行凭据与席位已成功录入系统，祝您旅途愉快！</div>
+        </div>
+      </div>
     </div>
 
     <!-- Action Buttons -->
     <div class="action-buttons">
-      <el-button
-        type="primary"
-        size="small"
-        class="checkout-btn"
-        @click="openCheckout"
-      >
-        <el-icon><CreditCard /></el-icon>
-        前往 Mock 收银台支付
-      </el-button>
-      <el-button
-        size="small"
-        @click="confirmPaid"
-      >
-        我已完成支付
-      </el-button>
+      <template v-if="step < 4">
+        <el-button
+          type="primary"
+          size="small"
+          class="checkout-btn"
+          @click="openCheckout"
+        >
+          <el-icon><CreditCard /></el-icon>
+          前往 Mock 收银台支付
+        </el-button>
+        <el-button
+          size="small"
+          @click="confirmPaid"
+        >
+          我已完成支付
+        </el-button>
+      </template>
       <router-link to="/travel/orders" class="view-order-link">
         查看我的订单 ➔
       </router-link>
@@ -77,7 +102,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useChatStore } from '@/stores/chat'
 
 const props = defineProps<{
@@ -89,27 +114,47 @@ const props = defineProps<{
 
 const chatStore = useChatStore()
 const qrFallback = ref(false)
+const locallyPaid = ref(false)
+
+const isPaid = computed(() => {
+  if (locallyPaid.value) return true
+  const b = props.blocks || []
+  if (b.some((item) => item?.status === 'PAID')) return true
+  const t = props.text || ''
+  if (t.includes('已出票') || t.includes('已支付出票') || t.includes('已支付') || t.includes('出票完成')) {
+    return true
+  }
+  return false
+})
 
 const step = computed(() => {
+  if (isPaid.value) return 4
   const t = props.text || ''
-  if (t.includes('付好了') || t.includes('已出票') || t.includes('支付成功')) {
+  if (t.includes('待支付') || t.includes('等待本人扫码支付') || t.includes('生成支付二维码') || props.orderNo) {
     return 3
   }
-  if (t.includes('锁定座位') || t.includes('已锁定') || t.includes('待支付') || props.orderNo) {
+  if (t.includes('锁定座位') || t.includes('已锁定')) {
     return 2
   }
   return 1
 })
 
 const statusTitle = computed(() => {
-  if (step.value === 3) return '订单已进入支付核销'
+  if (step.value === 4) return '✅ 订单已支付出票完成'
+  if (step.value === 3) return '订单待支付 · 请本人扫码或前往收银台'
   if (step.value === 2) return '座位锁定成功 · 等待支付'
   return '订单正在异步处理中...'
 })
 
 const statusDesc = computed(() => {
-  if (step.value >= 2) {
-    return '请于 15 分钟内完成支付。订单将由 12306 模拟平台自动出票。'
+  if (step.value === 4) {
+    return 'Mock 供应商已完成出票核销，行程已加入您的出行日程。可随时在订单列表查看或办理改签退票。'
+  }
+  if (step.value === 3) {
+    return '请于 15 分钟内完成支付。Agent 绝不代付，支持本人微信/支付宝扫码或点击下方前往收银台。'
+  }
+  if (step.value === 2) {
+    return '已锁定座席，正在为您生成收银台与专属支付凭据…'
   }
   return 'Agent 正在为您连接铁路/航空数据接口提交购票请求。'
 })
@@ -120,7 +165,6 @@ const hasQrCode = computed(() => {
 
 const qrImageUrl = computed(() => {
   if (qrFallback.value) {
-    // Generates deterministically derived SVG placeholder if file not present
     return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><rect fill="%23f8fafc" width="100" height="100"/><rect fill="%232563eb" x="10" y="10" width="30" height="30"/><rect fill="%232563eb" x="60" y="10" width="30" height="30"/><rect fill="%232563eb" x="10" y="60" width="30" height="30"/><rect fill="%230f172a" x="50" y="50" width="10" height="10"/><text x="50" y="85" font-size="10" text-anchor="middle" fill="%2364748b">MOCK PAY</text></svg>`
   }
   return '/media/qr_code.jpg'
@@ -132,13 +176,38 @@ function onQrError() {
 
 function openCheckout() {
   const order = props.orderNo || 'ORD-DEMO'
-  const url = `/mock/checkout.html?order_no=${encodeURIComponent(order)}&price=553&auto_pay=2`
+  const price = props.blocks?.[0]?.price || 553
+  const url = `/mock/checkout.html?order_no=${encodeURIComponent(order)}&price=${encodeURIComponent(price)}&auto_pay=0`
   window.open(url, '_blank', 'width=560,height=640')
 }
 
 function confirmPaid() {
   chatStore.sendMessage('付好了')
 }
+
+function onWindowMessage(event: MessageEvent) {
+  if (event.data?.type === 'PAYMENT_SUCCESS') {
+    if (!props.orderNo || event.data.orderNo === props.orderNo || event.data.orderNo === 'ORD-DEMO') {
+      locallyPaid.value = true
+      chatStore.handleSSEMessage({
+        kind: 'CARD',
+        orderNo: props.orderNo || event.data.orderNo,
+        taskId: props.taskId,
+        text: `✅ 订单 ${props.orderNo || event.data.orderNo} 已支付出票（Mock 供应商·页面检测）。可回复“查订单”查看。`,
+        blocks: [{ orderNo: props.orderNo || event.data.orderNo, status: 'PAID' }],
+        task_progress: { taskId: props.taskId, status: 'PAID', progress: 100, orderNo: props.orderNo || event.data.orderNo },
+      })
+    }
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('message', onWindowMessage)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('message', onWindowMessage)
+})
 </script>
 
 <style scoped>
@@ -246,6 +315,12 @@ function confirmPaid() {
   border-radius: 8px;
   padding: 10px 12px;
   margin-bottom: 12px;
+  transition: all 0.3s ease;
+}
+
+.status-box-success {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
 }
 
 .status-indicator {
@@ -264,6 +339,11 @@ function confirmPaid() {
   animation: pulse 2s infinite;
 }
 
+.pulse-dot.dot-success {
+  background: #16a34a;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.3);
+}
+
 @keyframes pulse {
   0% { transform: scale(0.95); opacity: 0.8; }
   50% { transform: scale(1.15); opacity: 1; }
@@ -280,6 +360,43 @@ function confirmPaid() {
   font-size: 11.5px;
   color: #64748b;
   line-height: 1.5;
+}
+
+.success-preview {
+  margin-bottom: 14px;
+}
+
+.success-badge-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.success-icon {
+  font-size: 26px;
+  color: #16a34a;
+  flex-shrink: 0;
+}
+
+.success-text-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.success-main {
+  font-size: 13px;
+  font-weight: 600;
+  color: #15803d;
+}
+
+.success-sub {
+  font-size: 11.5px;
+  color: #166534;
 }
 
 .checkout-preview {
@@ -319,6 +436,29 @@ function confirmPaid() {
 .qr-tip-sub {
   font-size: 11px;
   color: #60a5fa;
+}
+
+.payment-hint {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: #475569;
+}
+
+.payment-hint .hint-icon {
+  color: #3b82f6;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.payment-hint strong {
+  color: #1e293b;
 }
 
 .action-buttons {

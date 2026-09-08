@@ -472,8 +472,15 @@ function jumpToReplay() {
   padding-top: 4px;
 }
 
+.actions-footer :deep(.el-button),
+.actions-footer .el-button {
+  width: 100%;
+  margin-left: 0 !important;
+}
+
 .full-btn {
   width: 100%;
+  margin: 0 !important;
   border-radius: 8px;
   font-size: 12px;
   height: 34px;

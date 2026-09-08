@@ -56,4 +56,22 @@ export interface TripEpisode {
 export interface DistillReport {
   userId: number
   content: string
+  preferencesV2?: {
+    user?: Record<string, any>
+    passengers?: Record<string, Record<string, any>>
+    [key: string]: any
+  }
+}
+
+export interface UserMemoryEvent {
+  id: number
+  userId: number
+  eventType: string
+  sessionId?: string
+  taskId?: string
+  traceId?: string
+  orderNo?: string
+  context?: Record<string, any>
+  result?: Record<string, any>
+  createdAt?: string
 }

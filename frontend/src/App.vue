@@ -3,7 +3,11 @@
     <!-- Topbar Header -->
     <header class="topbar">
       <div class="brand">
-        <div class="brand-badge">行</div>
+        <div class="brand-badge" title="出行规划与预订助手">
+          <svg class="brand-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M20.665 3.717l-17.73 6.837c-1.21.486-1.203 1.161-.222 1.462l4.552 1.42 10.532-6.645c.498-.303.953-.14.579.192l-8.533 7.701h-.002l-.313 4.694c.46 0 .664-.211.921-.46l2.211-2.15 4.599 3.397c.848.467 1.457.227 1.668-.785l3.019-14.228c.309-1.239-.473-1.8-1.282-1.435z" />
+          </svg>
+        </div>
         <div class="brand-text">
           <div class="brand-title">出行规划与预订助手</div>
           <div class="brand-subtitle">规划 · 下单 · 记忆 · 可观测 · 评测闭环</div>
@@ -124,9 +128,12 @@ function onUserIdChange(val: number | undefined) {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 18px;
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+}
+
+.brand-icon {
+  display: block;
+  transform: translate(-1px, 1px);
 }
 
 .brand-text {

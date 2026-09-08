@@ -16,13 +16,18 @@
       <div class="message-meta">
         <span class="meta-role">{{ roleLabel }}</span>
         <span class="meta-time">{{ message.timestamp }}</span>
-        <span v-if="message.traceId" class="trace-tag" :title="'Trace ID: ' + message.traceId">
+        <span
+          v-if="message.traceId"
+          class="trace-tag"
+          :title="'点击在右侧查看此轮调度的 Trace: ' + message.traceId"
+          @click.stop="handleTraceClick(message.traceId)"
+        >
           Trace #{{ message.traceId.slice(-6) }}
         </span>
       </div>
 
       <!-- Main Text Box -->
-      <div class="text-bubble">
+      <div v-if="showTextBubble" class="text-bubble">
         <div class="text-content" v-html="formattedText"></div>
       </div>
 
@@ -66,6 +71,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ChatMessage } from '@/types/chat'
+import { useRuntimeStore } from '@/stores/runtime'
 import ClarifyCard from './ClarifyCard.vue'
 import PlanCard from './PlanCard.vue'
 import ActionCard from './ActionCard.vue'
@@ -74,6 +80,14 @@ import OrderListCard from './OrderListCard.vue'
 const props = defineProps<{
   message: ChatMessage
 }>()
+
+const runtimeStore = useRuntimeStore()
+
+function handleTraceClick(traceId: string) {
+  if (traceId) {
+    runtimeStore.fetchTrace(traceId)
+  }
+}
 
 const roleLabel = computed(() => {
   if (props.message.role === 'user') return '您'
@@ -109,6 +123,13 @@ const hasAction = computed(() => {
       Boolean(props.message.taskId) ||
       props.message.responseType === 'TASK_PROGRESS')
   )
+})
+
+const showTextBubble = computed(() => {
+  // 当存在方案推荐卡片、订单列表卡片或订单履约卡片时，完全由各自交互卡片承载，隐藏上方重复的长文本气泡
+  if (hasPlans.value || hasOrders.value || hasAction.value) return false
+  if (!props.message.text) return false
+  return true
 })
 </script>
 
@@ -189,6 +210,16 @@ const hasAction = computed(() => {
   border: 1px solid #bfdbfe;
   padding: 1px 6px;
   border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.trace-tag:hover {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #93c5fd;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.15);
 }
 
 .text-bubble {

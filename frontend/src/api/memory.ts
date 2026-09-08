@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { UserProfile, TripEpisode, DistillReport } from '@/types/memory'
+import type { UserProfile, TripEpisode, DistillReport, UserMemoryEvent } from '@/types/memory'
 
 export const memoryApi = {
   getProfile: () => apiClient.get<UserProfile>('/profiles'),
@@ -10,7 +10,8 @@ export const memoryApi = {
     apiClient.put<UserProfile>(`/profiles/passengers/${passengerId}`, payload),
   deletePassenger: (passengerId: string) =>
     apiClient.delete<UserProfile>(`/profiles/passengers/${passengerId}`),
-  listEpisodes: (limit = 20) => apiClient.get<TripEpisode[]>('/memory/episodes', { params: { limit } }),
+  listEpisodes: (limit = 50) => apiClient.get<TripEpisode[]>('/memory/episodes', { params: { limit } }),
+  listUserEvents: (limit = 50) => apiClient.get<UserMemoryEvent[]>('/memory/events', { params: { limit } }),
   getDistillReport: () => apiClient.get<DistillReport>('/memory/distill'),
   triggerDistill: () => apiClient.post<DistillReport>('/memory/distill'),
 }

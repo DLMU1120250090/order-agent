@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { memoryApi } from '@/api/memory'
-import type { UserProfile, TripEpisode, DistillReport } from '@/types/memory'
+import type { UserProfile, TripEpisode, DistillReport, UserMemoryEvent } from '@/types/memory'
 
 export const useMemoryStore = defineStore('memory', () => {
   const profile = ref<UserProfile | null>(null)
   const episodes = ref<TripEpisode[]>([])
+  const userEvents = ref<UserMemoryEvent[]>([])
   const distillReport = ref<DistillReport | null>(null)
   const isLoading = ref(false)
   const isSaving = ref(false)
@@ -44,6 +45,15 @@ export const useMemoryStore = defineStore('memory', () => {
     }
   }
 
+  async function fetchUserEvents() {
+    try {
+      userEvents.value = await memoryApi.listUserEvents(50)
+    } catch (err) {
+      console.error('[MemoryStore] Failed to fetch user events:', err)
+      userEvents.value = []
+    }
+  }
+
   async function fetchDistillReport() {
     try {
       distillReport.value = await memoryApi.getDistillReport()
@@ -72,6 +82,7 @@ export const useMemoryStore = defineStore('memory', () => {
       await Promise.allSettled([
         fetchProfile(),
         fetchEpisodes(),
+        fetchUserEvents(),
         fetchDistillReport(),
       ])
     } finally {
@@ -82,6 +93,7 @@ export const useMemoryStore = defineStore('memory', () => {
   return {
     profile,
     episodes,
+    userEvents,
     distillReport,
     isLoading,
     isSaving,
@@ -90,6 +102,7 @@ export const useMemoryStore = defineStore('memory', () => {
     fetchProfile,
     updateProfile,
     fetchEpisodes,
+    fetchUserEvents,
     fetchDistillReport,
     triggerDistill,
     fetchAll,

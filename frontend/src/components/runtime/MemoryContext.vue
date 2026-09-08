@@ -35,13 +35,13 @@
         </div>
 
         <div class="item-kv">
-          <span class="item-key">{{ item.key }}</span>
-          <span class="item-equal">=</span>
-          <span class="item-value">{{ item.value }}</span>
+          <span class="item-key">{{ formatKey(item.key) }}</span>
+          <span class="item-equal">:</span>
+          <span class="item-value">{{ formatValue(item.value) }}</span>
         </div>
 
         <div v-if="item.description" class="item-desc">
-          {{ item.description }}
+          {{ formatDescription(item.description) }}
         </div>
 
         <div v-if="item.scoreImpact" class="score-impact">
@@ -53,7 +53,7 @@
 
     <!-- Jump to Memory Center -->
     <div class="footer-actions">
-      <router-link to="/memory" class="jump-link">
+      <router-link to="/travel/memory" class="jump-link">
         <el-button type="primary" plain class="full-btn">
           <el-icon><FolderOpened /></el-icon>
           前往 Memory Center 维护全局记忆
@@ -79,6 +79,59 @@ function sourceLabel(source: InjectedMemoryItem['source']): string {
     default:
       return '系统规则'
   }
+}
+
+function formatKey(k: string): string {
+  if (!k) return '偏好项'
+  return k
+}
+
+function formatValue(v: any): string {
+  if (!v) return ''
+  const str = String(v).trim()
+  if (str.startsWith('{') || str.startsWith('[')) {
+    try {
+      const obj = JSON.parse(str)
+      if (obj && typeof obj === 'object') {
+        const val = obj.value ?? obj.name ?? obj.detail
+        if (val !== undefined) {
+          return formatFriendlyValue(val)
+        }
+      }
+    } catch {}
+  }
+  return formatFriendlyValue(str)
+}
+
+function formatFriendlyValue(val: any): string {
+  const s = String(val).toLowerCase()
+  if (s === 'economy' || s === '经济型') return '经济优先 (economy)'
+  if (s === 'standard' || s === 'comfort' || s === '舒适型') return '标准舒适 (standard)'
+  if (s === 'luxury' || s === 'premium' || s === '高端型') return '尊享商务 (luxury)'
+  if (s.includes('train') || s.includes('高铁') || s.includes('火车')) return '高铁 / 火车 (train)'
+  if (s.includes('flight') || s.includes('飞机')) return '民航飞机 (flight)'
+  if (s.includes('window')) return '靠窗座 (window)'
+  if (s.includes('aisle')) return '过道座 (aisle)'
+  return String(val)
+}
+
+function formatDescription(desc: string): string {
+  if (!desc) return ''
+  if (desc.includes('{') && desc.includes('}')) {
+    try {
+      const match = desc.match(/\[([^=]+)=(.+)\]/)
+      if (match) {
+        const k = match[1]
+        const rawJson = match[2]
+        const parsed = JSON.parse(rawJson)
+        const v = parsed?.value ?? parsed
+        return `从画像与记忆中自动补全槽位 [${k}: ${formatFriendlyValue(v)}]`
+      }
+    } catch {
+      return desc.replace(/\{.*?\}/g, '').replace(/\[.*?\=.*?\]/g, '已结合记忆自动补全')
+    }
+  }
+  return desc
 }
 </script>
 
@@ -153,6 +206,9 @@ function sourceLabel(source: InjectedMemoryItem['source']): string {
   padding: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
   transition: all 0.2s ease;
+  overflow: hidden;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .memory-card:hover {
@@ -208,30 +264,40 @@ function sourceLabel(source: InjectedMemoryItem['source']): string {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  font-family: monospace;
   font-size: 12.5px;
   margin-bottom: 4px;
+  flex-wrap: wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .item-key {
   color: #0f172a;
-  font-weight: 600;
+  font-weight: 700;
+  font-size: 12.5px;
+  word-break: break-all;
 }
 
 .item-equal {
   color: #94a3b8;
+  font-weight: 600;
 }
 
 .item-value {
   color: #2563eb;
   font-weight: 600;
+  font-size: 12.5px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .item-desc {
   font-size: 11.5px;
   color: #64748b;
-  line-height: 1.4;
+  line-height: 1.45;
   margin-bottom: 6px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .score-impact {

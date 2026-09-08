@@ -14,6 +14,17 @@
       </div>
 
       <div class="top-right">
+        <div class="passenger-badges">
+          <span
+            v-for="p in passengerLabels"
+            :key="p.id"
+            class="passenger-badge"
+            :class="{ is_self: p.isSelf }"
+          >
+            <el-icon><User /></el-icon>
+            {{ p.label }}
+          </span>
+        </div>
         <span class="trip-id-badge">Trip #{{ episode.tripId || episode.id }}</span>
         <span class="time-txt">{{ formatDate(episode.createdAt) }}</span>
       </div>
@@ -82,13 +93,49 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useMemoryStore } from '@/stores/memory'
 import type { TripEpisode } from '@/types/memory'
 
 const props = defineProps<{
   episode: TripEpisode
 }>()
 
+const memoryStore = useMemoryStore()
 const showSummary = ref(false)
+
+const passengerLabels = computed(() => {
+  const pids = props.episode.episode?.passengers || []
+  if (!pids || pids.length === 0) {
+    return [{ id: '0', label: '乘车人: 本人 (0)', isSelf: true }]
+  }
+  const roster = memoryStore.profile?.passengers || []
+  const map: Record<string, { name: string; isSelf: boolean }> = {}
+  for (const p of roster) {
+    const isSelf = String(p.passenger_id) === '0' || p.role === 'self'
+    map[String(p.passenger_id)] = {
+      name: p.name || (isSelf ? '本人' : p.passenger_id),
+      isSelf,
+    }
+  }
+
+  return pids.map((pid: string | number) => {
+    const pidStr = String(pid)
+    const info = map[pidStr]
+    if (info) {
+      return {
+        id: pidStr,
+        label: `乘车人: ${info.name}${info.isSelf ? ' (本人)' : ''}`,
+        isSelf: info.isSelf,
+      }
+    }
+    const isSelf = pidStr === '0'
+    return {
+      id: pidStr,
+      label: `乘车人: ${isSelf ? '本人 (0)' : pidStr}`,
+      isSelf,
+    }
+  })
+})
 
 const decisionReasons = computed(() => {
   const r = props.episode.episode?.decision_reason
@@ -124,6 +171,32 @@ function formatDate(dateStr?: string): string {
   gap: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
   transition: all 0.2s ease;
+}
+
+.passenger-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.passenger-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+
+.passenger-badge.is_self {
+  background: #f0fdf4;
+  color: #15803d;
+  border-color: #bbf7d0;
 }
 
 .episode-card:hover {
