@@ -41,12 +41,16 @@
   "budget": ["经济型", "舒适型", "高端型"],
   "travelStyle": ["紧凑", "休闲", "美食"],
   "transportMode": ["飞机", "高铁", "火车"],
-  "companion": ["独自", "情侣", "亲子"]
+  "companion": ["独自", "情侣", "亲子"],
+  "passengers": ["本人出行 (1人)", "2人同行", "家庭/多人 (3人+)"]
 }
 
 【槽位规则】
-- slots 包含 origin、destination、tripDate、returnDate、budget、travelStyle、transportMode、companion。
+- slots 包含 origin、destination、tripDate、returnDate、budget、travelStyle、transportMode、companion、passengers。
 - origin、destination、returnDate、budget、travelStyle、transportMode、companion 尽量从 slotOptions 对应字段的候选值中选择。
+- passengers 为出行乘车人或出行人数（如"本人"、"2人"、"我和老婆两个人"、"帮李四买票"等）：
+  若用户明确提及人数（如"2人"、"三个人"），填入对应人数（如"2人"）；
+  若用户提及人名（如"李四"、"本人"），填入乘车人；可多值用逗号分隔（如"本人,李四"）；没有提及则输出 null。
 - origin 为出发地：用户说"从X出发"、"从X去Y"、"X去Y"、"X到Y"时，X 填入 origin，Y 填入 destination；
   没有明确起点则 origin 输出 null（后端默认使用常住地/北京）。
 - returnDate 为返程/回程/游玩天数：用户提到"返程/回程/回来/玩几天/待几天/几天"时填入对应表达；
@@ -70,7 +74,8 @@
     "budget": "经济型",
     "travelStyle": "休闲",
     "transportMode": "飞机,高铁",
-    "companion": null
+    "companion": null,
+    "passengers": null
   },
   "confidence": 0.9
 }

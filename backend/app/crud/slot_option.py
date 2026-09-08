@@ -8,7 +8,7 @@ from app.models.database import SlotOptionRow
 from app.models.schemas import TravelSlotBundle
 
 
-TRAVEL_SLOT_NAMES = ["origin", "destination", "tripDate", "budget", "travelStyle", "transportMode", "companion"]
+TRAVEL_SLOT_NAMES = ["origin", "destination", "tripDate", "budget", "travelStyle", "transportMode", "companion", "passengers"]
 # tripDate 为自由值，不走字典白名单
 WHITELIST_SLOT_NAMES = ["origin", "destination", "budget", "travelStyle", "transportMode", "companion"]
 

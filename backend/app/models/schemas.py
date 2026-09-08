@@ -49,8 +49,9 @@ class TravelSlotBundle(BaseModel):
     travelStyle: List[str] = Field(default_factory=list, description="出行风格：紧凑/休闲/美食/购物/亲子/商务")
     transportMode: List[str] = Field(default_factory=list, description="交通偏好集合：飞机/高铁/火车/大巴")
     companion: List[str] = Field(default_factory=list, description="同行人：独自/情侣/亲子/商务")
+    passengers: List[str] = Field(default_factory=list, description="出行乘车人或人数，如 ['本人'] 或 ['本人', '李四'] 或 ['2人']")
 
-    @field_validator("origin", "destination", "tripDate", "returnDate", "budget", "travelStyle", "transportMode", "companion", mode="before")
+    @field_validator("origin", "destination", "tripDate", "returnDate", "budget", "travelStyle", "transportMode", "companion", "passengers", mode="before")
     @classmethod
     def _coerce_slot_value(cls, v):
         return _normalize_slot_values(v)
@@ -90,6 +91,8 @@ class OutboundMessage(BaseModel):
     task_progress: Optional[dict] = Field(default=None, description='{"taskId","status","progress"}')
     correlation_id: Optional[str] = Field(default=None, description="关联 traceId / taskId")
     sync_reply: bool = Field(default=False, description="Web 同步回复（HTTP 响应已返回，SSE 不再重复推送）")
+    missing_slots: List[str] = Field(default_factory=list, description="当前缺失待澄清的槽位")
+    confirm_fields: List[str] = Field(default_factory=list, description="从记忆推断需用户确认的字段")
 
 
 class TravelChatRequest(BaseModel):
@@ -109,6 +112,7 @@ class TravelChatResponse(BaseModel):
     nextAction: str = Field(default="WAIT_USER")
     clarifyQuestion: Optional[str] = None
     missingSlots: List[str] = Field(default_factory=list)
+    confirmFields: List[str] = Field(default_factory=list, description="需要用户确认的偏好字段")
     taskId: Optional[str] = None
     orderNo: Optional[str] = None
 
@@ -390,5 +394,24 @@ class SessionState(BaseModel):
     pendingConfirms: List[str] = Field(default_factory=list)
     # 分化方案 P0（Commit 1）：本次购票乘客
     currentPassengerId: str = Field(default="0", description="本次购票乘客（本人默认 0）")
+    currentPassengerIds: List[str] = Field(default_factory=lambda: ["0"], description="本次出行绑定的乘车人 ID 列表")
     passengerSelectionPending: bool = Field(default=False, description="正在等待乘客选择回答")
     passengerSelectionDone: bool = Field(default=False, description="本会话已确认过购票乘客")
+
+
+class PassengerCreateInput(BaseModel):
+    name: str = Field(description="真实姓名")
+    id_type: str = Field(default="身份证", description="证件类型")
+    id_no: str = Field(description="证件号码")
+    role: str = Field(default="others", description="角色: self 或 others")
+    age_group: Optional[str] = Field(default="adult", description="年龄段: adult/child/senior")
+
+
+class PassengerUpdateInput(BaseModel):
+    name: Optional[str] = None
+    id_type: Optional[str] = None
+    id_no: Optional[str] = None
+    role: Optional[str] = None
+    age_group: Optional[str] = None
+    seat_need: Optional[str] = None
+

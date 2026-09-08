@@ -10,6 +10,7 @@ from app.agents.factory import AgentFactory
 from app.agents.intent import IntentResultSchema
 from app.crud import binding as binding_crud
 from app.crud import order as order_crud
+from app.crud import profile as profile_crud
 from app.crud import session as session_crud
 from app.crud import slot_option as slot_option_crud
 from app.crud import task as task_crud
@@ -106,6 +107,44 @@ def resolve_passenger_choice(text: str, profile) -> Optional[str]:
         if name and (name in t or t in name):
             return str(p.get("passenger_id") or "")
     return None
+
+
+ID_CARD_PATTERN = re.compile(r"([1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx])")
+
+
+def resolve_passenger_choices(text: str, profile) -> List[str]:
+    """解析多个乘车人回复：返回匹配到的 passenger_id 列表。"""
+    if not profile or not text:
+        return []
+    t = (text or "").strip()
+    results = []
+    others = _other_passengers(profile)
+    # 本人
+    if any(k in t for k in ("本人", "自己", "我自己", "给我自己")) or t == "0":
+        results.append("0")
+    # 全部
+    if any(k in t for k in ("全部", "所有人", "都去", "全去", "全选")):
+        results.append("0")
+        for p in others:
+            pid = str(p.get("passenger_id") or "")
+            if pid and pid not in results:
+                results.append(pid)
+        return results
+    # 其它乘客姓名匹配
+    for p in others:
+        name = str(p.get("name") or "")
+        pid = str(p.get("passenger_id") or "")
+        if name and name in t and pid not in results:
+            results.append(pid)
+    # 编号匹配
+    matches = re.findall(r"第?(\d+|[一二三四五六七八九十]+)个?", t)
+    for raw in matches:
+        idx = int(raw) if raw.isdigit() else _CN_NUM.get(raw, 0)
+        if 1 <= idx <= len(others):
+            pid = str(others[idx - 1].get("passenger_id") or "")
+            if pid and pid not in results:
+                results.append(pid)
+    return results
 
 
 def passenger_selection_question(profile) -> str:
@@ -256,14 +295,39 @@ class TravelOrchestratorService:
             state = state.model_copy(update={"pendingConfirms": []})
             await self._save_state(db, state)
 
-        # ③.6 乘客选择回答（分化方案 P0 / Commit 1）
+        # ③.6 乘客选择回答（分化方案 P0 / Commit 1 & 升级方案）
         if (
             state.phase == SessionPhase.CLARIFY
             and state.passengerSelectionPending
             and state.currentIntent == Intent.PLAN_BOOK
         ):
             profile = await self.memory.get_profile(db, user_id)
-            chosen = resolve_passenger_choice(text, profile)
+            # 优先检查是否输入了新乘车人的身份证号进行实名补全
+            id_match = ID_CARD_PATTERN.search(text)
+            if id_match:
+                id_no = id_match.group(1)
+                clean_text = text.replace(id_no, "").strip()
+                name_match = re.search(r"(?:叫|名字|姓名|给|帮|乘客)?\s*([\u4e00-\u9fa5]{2,4})", clean_text)
+                p_name = name_match.group(1) if name_match else "同行人"
+                new_p = {"name": p_name, "id_no": id_no, "id_type": "身份证", "role": "others"}
+                updated_profile = await self.memory.update_profile(db, user_id, passengers=[new_p])
+                profile = updated_profile
+                new_id = profile_crud._new_passenger_id(new_p)
+                current_ids = list(state.currentPassengerIds or ["0"])
+                if new_id not in current_ids:
+                    current_ids.append(new_id)
+                resolved_state = state.model_copy(update={
+                    "currentPassengerId": new_id,
+                    "currentPassengerIds": current_ids,
+                    "passengerSelectionPending": False,
+                    "passengerSelectionDone": True,
+                })
+                await self._save_state(db, resolved_state)
+                ctx.record_event("PASSENGER_NEW_RECORDED", "PASSENGER", {"name": p_name, "idNo": id_no[:6] + "******"}, {"passengerId": new_id})
+                return await self._handle_book(db, user_id, text, resolved_state, ctx)
+
+            chosen_list = resolve_passenger_choices(text, profile)
+            chosen = chosen_list[0] if chosen_list else resolve_passenger_choice(text, profile)
             if not chosen:
                 question = passenger_selection_question(profile)
                 ctx.record_event("PASSENGER_SELECTION_RETRY", "PASSENGER", {"text": text}, {"question": question})
@@ -271,11 +335,12 @@ class TravelOrchestratorService:
                 return self._finish(db, state, ctx, msg, clarify=True)
             resolved_state = state.model_copy(update={
                 "currentPassengerId": chosen,
+                "currentPassengerIds": chosen_list or [chosen],
                 "passengerSelectionPending": False,
                 "passengerSelectionDone": True,
             })
             await self._save_state(db, resolved_state)
-            ctx.record_event("PASSENGER_SELECTED", "PASSENGER", {"text": text}, {"passengerId": chosen})
+            ctx.record_event("PASSENGER_SELECTED", "PASSENGER", {"text": text}, {"passengerId": chosen, "passengerIds": chosen_list or [chosen]})
             return await self._handle_book(db, user_id, text, resolved_state, ctx)
 
         # ④ 标准意图流
@@ -419,6 +484,7 @@ class TravelOrchestratorService:
                 kind="CLARIFY",
                 text=question,
                 blocks=[],
+                missing_slots=missing,
             )
             ctx.record_event("RESPONSE_READY", "CLARIFY", {"missing": missing}, msg.model_dump())
             return self._finish(db, clarify_state, ctx, msg, clarify=True)
@@ -438,6 +504,7 @@ class TravelOrchestratorService:
                 kind="CLARIFY",
                 text=question,
                 blocks=[],
+                confirm_fields=resolved.pending_confirm,
             )
             ctx.record_event("RESPONSE_READY", "MEMORY_CONFIRM", {"confirmFields": resolved.pending_confirm}, msg.model_dump())
             return self._finish(db, confirm_state, ctx, msg, clarify=True)
@@ -540,10 +607,24 @@ class TravelOrchestratorService:
         plan = PlanOption(**plan_row.plan_json)
 
         passenger_id = gate if gate != "ASK" else "0"
+        target_ids = set(state.currentPassengerIds or ([passenger_id] if passenger_id else ["0"]))
+        profile_passengers = profile.passengers or []
         passengers = [
-            p for p in (profile.passengers or [])
-            if str(p.get("passenger_id") or "") == str(passenger_id)
-        ] or None
+            p for p in profile_passengers
+            if str(p.get("passenger_id") or "") in target_ids
+        ]
+        # 若 slots.passengers 指定了乘客姓名，匹配已有乘客
+        if state.slots.passengers:
+            for p in profile_passengers:
+                p_name = str(p.get("name") or "")
+                p_id = str(p.get("passenger_id") or "")
+                if (p_name in state.slots.passengers or p_id in state.slots.passengers) and p not in passengers:
+                    passengers.append(p)
+        if not passengers:
+            passengers = [
+                p for p in profile_passengers
+                if str(p.get("passenger_id") or "") == str(passenger_id)
+            ] or None
         order = await self.booking.create_order_draft(
             db,
             user_id,

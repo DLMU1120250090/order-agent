@@ -23,7 +23,8 @@ def _to_chat_response(msg: OutboundMessage, session_id: str) -> TravelChatRespon
         displayBlocks=msg.blocks,
         nextAction="ASK_CLARIFY" if resp_type == "CLARIFY" else "WAIT_USER",
         clarifyQuestion=msg.text if resp_type == "CLARIFY" else None,
-        missingSlots=[],
+        missingSlots=msg.missing_slots,
+        confirmFields=msg.confirm_fields,
         taskId=msg.task_progress.get("taskId") if msg.task_progress else None,
         orderNo=msg.correlation_id if msg.correlation_id and msg.correlation_id.startswith("ORD") else None,
     )

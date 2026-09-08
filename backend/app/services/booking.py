@@ -71,9 +71,9 @@ class BookingService:
             return existing
 
         first_mode = plan.legs[0].mode if plan.legs else "FLIGHT"
-        order_no = f"ORD{datetime.now().strftime('%Y%m%d%H%M%S')}{user_id % 100:02d}"
-        total_price = round(sum(leg.price for leg in plan.legs), 2)
-        tax_fee = round(50.0, 2)
+        passenger_count = max(1, len(passengers))
+        total_price = round(sum(leg.price for leg in plan.legs) * passenger_count, 2)
+        tax_fee = round(50.0 * passenger_count, 2)
 
         row = TravelOrderRow(
             user_id=user_id,

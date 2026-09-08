@@ -48,6 +48,7 @@ def serialize_slots_and_meta(state: SessionState) -> dict:
         "orderNo": state.orderNo,
         "pendingConfirms": list(state.pendingConfirms),
         "currentPassengerId": state.currentPassengerId,
+        "currentPassengerIds": list(state.currentPassengerIds or [state.currentPassengerId or "0"]),
         "passengerSelectionPending": state.passengerSelectionPending,
         "passengerSelectionDone": state.passengerSelectionDone,
     }
@@ -65,8 +66,8 @@ async def create_session(
         session_id = f"sess_{uuid.uuid4().hex}"
     empty_slots = {
         "destination": [], "tripDate": [], "budget": [], "travelStyle": [],
-        "transportMode": [], "companion": [],
-        "_meta": {"channel": channel.value, "currentIntent": None, "selectedPlanId": None, "orderId": None, "orderNo": None, "pendingConfirms": [], "currentPassengerId": "0", "passengerSelectionPending": False, "passengerSelectionDone": False},
+        "transportMode": [], "companion": [], "passengers": [],
+        "_meta": {"channel": channel.value, "currentIntent": None, "selectedPlanId": None, "orderId": None, "orderNo": None, "pendingConfirms": [], "currentPassengerId": "0", "currentPassengerIds": ["0"], "passengerSelectionPending": False, "passengerSelectionDone": False},
     }
     row = SessionRow(
         id=session_id,
@@ -161,6 +162,7 @@ async def load_session_state(
         orderNo=meta.get("orderNo"),
         pendingConfirms=meta.get("pendingConfirms") or [],
         currentPassengerId=str(meta.get("currentPassengerId") or "0"),
+        currentPassengerIds=[str(x) for x in (meta.get("currentPassengerIds") or [meta.get("currentPassengerId") or "0"])],
         passengerSelectionPending=bool(meta.get("passengerSelectionPending")),
         passengerSelectionDone=bool(meta.get("passengerSelectionDone")),
     )
@@ -234,6 +236,8 @@ async def recent_conversation_turns(
             resp_type = "CLARIFY" if r.intent == "CLARIFY_NEEDED" else ("PLAN_RECOMMENDATION" if r.intent == "PLAN_RECOMMENDATION" else "ANSWER")
 
         display_blocks = []
+        turn_missing_slots = None
+        turn_confirm_fields = None
         if r.role == "assistant" and r.agent_trace_id and r.agent_trace_id in trace_map:
             t_row = trace_map[r.agent_trace_id]
             t_json = t_row.trace_json
@@ -245,6 +249,16 @@ async def recent_conversation_turns(
             if isinstance(t_json, dict):
                 events = t_json.get("events", [])
                 for ev in events:
+                    if ev.get("eventType") == "CLARIFY_DECISION" and ev.get("outputPayload"):
+                        try:
+                            c_payload = json.loads(ev["outputPayload"]) if isinstance(ev["outputPayload"], str) else ev["outputPayload"]
+                            if isinstance(c_payload, dict):
+                                if "missingSlots" in c_payload:
+                                    turn_missing_slots = c_payload.get("missingSlots") or []
+                                if "confirmFields" in c_payload:
+                                    turn_confirm_fields = c_payload.get("confirmFields") or []
+                        except Exception:
+                            pass
                     if ev.get("eventType") == "REQUEST_FINISHED" and ev.get("outputPayload"):
                         try:
                             payload = json.loads(ev["outputPayload"]) if isinstance(ev["outputPayload"], str) else ev["outputPayload"]
@@ -267,7 +281,8 @@ async def recent_conversation_turns(
             "createdAt": epoch_ms,
         }
         if r.role == "assistant" and (resp_type == "CLARIFY" or r.intent == "CLARIFY_NEEDED"):
-            turn["missingSlots"] = ["transportMode", "budget", "tripDate"]
+            turn["missingSlots"] = turn_missing_slots if turn_missing_slots is not None else []
+            turn["confirmFields"] = turn_confirm_fields if turn_confirm_fields is not None else []
             turn["clarifyQuestion"] = content
 
         turns.append(turn)

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.schemas import UserProfile
+from app.models.schemas import UserProfile, PassengerCreateInput, PassengerUpdateInput
 from app.services.runtime import memory
 
 router = APIRouter(prefix="/api/v1/travel/profiles", tags=["travel-profiles"])
@@ -15,6 +15,7 @@ class ProfileUpdateRequest(BaseModel):
     homeCity: Optional[str] = None
     budgetLevel: Optional[str] = None
     preferences: Optional[dict] = None
+    preferences_v2: Optional[dict] = None
     passengers: Optional[List[dict]] = None
 
 
@@ -42,9 +43,85 @@ async def update_profile(
         fields["budget_level"] = request.budgetLevel
     if request.preferences:
         fields["preferences"] = request.preferences
+    if request.preferences_v2 is not None:
+        fields["preferences_v2"] = request.preferences_v2
     if request.passengers is not None:
         fields["passengers"] = request.passengers
     return await memory.update_profile(db, x_user_id, **fields)
+
+
+@router.post("/passengers", response_model=UserProfile)
+async def add_passenger(
+    request: PassengerCreateInput,
+    x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await memory.get_profile(db, x_user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="画像不存在")
+    new_passenger = request.model_dump()
+    return await memory.update_profile(db, x_user_id, passengers=[new_passenger])
+
+
+@router.put("/passengers/{passenger_id}", response_model=UserProfile)
+async def update_passenger(
+    passenger_id: str,
+    request: PassengerUpdateInput,
+    x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await memory.get_profile(db, x_user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="画像不存在")
+    from app.models.database import UserProfileRow
+    from sqlalchemy import select
+    res = await db.execute(select(UserProfileRow).where(UserProfileRow.user_id == x_user_id))
+    row = res.scalars().first()
+    if not row or not row.passengers:
+        raise HTTPException(status_code=404, detail="乘客未找到")
+    
+    updated_passengers = []
+    found = False
+    for p in row.passengers:
+        if str(p.get("passenger_id") or "") == passenger_id:
+            found = True
+            item = dict(p)
+            for k, v in request.model_dump(exclude_unset=True).items():
+                if v is not None:
+                    item[k] = v
+            # 若本人编辑，锁定 role="self" 与 passenger_id="0"
+            if passenger_id == "0":
+                item["role"] = "self"
+                item["passenger_id"] = "0"
+            updated_passengers.append(item)
+        else:
+            updated_passengers.append(p)
+    if not found:
+        raise HTTPException(status_code=404, detail="乘客未找到")
+    row.passengers = updated_passengers
+    await db.commit()
+    return await memory.get_profile(db, x_user_id)
+
+
+@router.delete("/passengers/{passenger_id}", response_model=UserProfile)
+async def delete_passenger(
+    passenger_id: str,
+    x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await memory.get_profile(db, x_user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="画像不存在")
+    if passenger_id == "0":
+        raise HTTPException(status_code=400, detail="本人乘客不可删除")
+    from app.models.database import UserProfileRow
+    from sqlalchemy import select
+    res = await db.execute(select(UserProfileRow).where(UserProfileRow.user_id == x_user_id))
+    row = res.scalars().first()
+    if row and row.passengers:
+        row.passengers = [p for p in row.passengers if str(p.get("passenger_id") or "") != passenger_id]
+        await db.commit()
+    return await memory.get_profile(db, x_user_id)
 
 
 memory_router = APIRouter(prefix="/api/v1/travel/memory", tags=["travel-memory"])

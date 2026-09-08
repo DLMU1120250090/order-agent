@@ -9,6 +9,7 @@ from app.services.orchestrator import (
     passenger_selection_gate,
     passenger_selection_question,
     resolve_passenger_choice,
+    resolve_passenger_choices,
 )
 
 
@@ -89,3 +90,28 @@ def test_state_roundtrip_passenger_fields():
     assert meta.get("currentPassengerId") == "P_M1"
     assert meta.get("passengerSelectionPending") is True
     assert meta.get("passengerSelectionDone") is False
+
+
+def test_resolve_choices_multi():
+    profile = _profile([
+        {"name": "本人", "id_no": "S1", "role": "self", "passenger_id": "0"},
+        {"name": "妈妈", "id_no": "M1", "role": "others", "passenger_id": "P_M1"},
+        {"name": "爸爸", "id_no": "D1", "role": "others", "passenger_id": "P_D1"},
+    ])
+    assert resolve_passenger_choices("本人和妈妈", profile) == ["0", "P_M1"]
+    assert resolve_passenger_choices("全部", profile) == ["0", "P_M1", "P_D1"]
+    assert resolve_passenger_choices("爸爸", profile) == ["P_D1"]
+
+
+def test_clarify_rule_requires_passengers():
+    from app.services.clarify_rule import ClarifyRuleService
+    svc = ClarifyRuleService()
+    slots = TravelSlotBundle(destination=["上海"], tripDate=["2026-10-01"], budget=["经济型"])
+    missing = svc.missing_slots(slots)
+    assert "passengers" in missing
+
+    slots_with_p = TravelSlotBundle(
+        destination=["上海"], tripDate=["2026-10-01"], budget=["经济型"], passengers=["本人出行 (1人)"]
+    )
+    assert "passengers" not in svc.missing_slots(slots_with_p)
+
