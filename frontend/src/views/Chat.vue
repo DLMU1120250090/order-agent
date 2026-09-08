@@ -151,6 +151,7 @@
 </template>
 
 <script setup lang="ts">
+defineOptions({ name: 'ChatView' })
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useChatStore, QUICK_QUESTIONS } from '@/stores/chat'
 import { useRuntimeStore } from '@/stores/runtime'

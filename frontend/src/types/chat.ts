@@ -38,6 +38,7 @@ export interface OrderBlockItem {
   price: number
   tripDate?: string
   legs?: PlanLeg[]
+  passengers?: any[]
 }
 
 export interface ClarifySlotOption {
@@ -55,6 +56,7 @@ export interface ChatMessage {
   responseType?: 'ANSWER' | 'CLARIFY' | 'TASK_PROGRESS'
   displayBlocks?: any[]
   missingSlots?: string[]
+  confirmFields?: string[]
   clarifyQuestion?: string
   taskId?: string
   orderNo?: string
@@ -77,6 +79,7 @@ export interface TravelChatResponse {
   nextAction: string
   clarifyQuestion?: string
   missingSlots: string[]
+  confirmFields?: string[]
   taskId?: string
   orderNo?: string
 }

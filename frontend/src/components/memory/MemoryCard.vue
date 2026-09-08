@@ -81,7 +81,12 @@
             <el-icon><User /></el-icon>
             <span>同行乘客簿与专属偏好 (Passenger Roster)</span>
           </div>
-          <span class="card-tag">{{ profile?.passengers?.length || 0 }} 位乘客</span>
+          <div class="card-actions">
+            <el-button size="small" type="primary" plain @click="openAddPassengerModal">
+              <el-icon><Plus /></el-icon>
+              添加乘车人
+            </el-button>
+          </div>
         </div>
 
         <div v-if="!profile?.passengers || profile.passengers.length === 0" class="empty-pref">
@@ -97,9 +102,34 @@
             <div class="passenger-top">
               <div class="p-name-role">
                 <span class="p-name">{{ p.name || p.passenger_id }}</span>
-                <span class="p-role">{{ p.role || '同行人' }}</span>
+                <el-tag
+                  size="small"
+                  :type="p.role === 'self' || String(p.passenger_id) === '0' ? 'primary' : 'success'"
+                  effect="light"
+                >
+                  {{ p.role === 'self' || String(p.passenger_id) === '0' ? '本人 (Self)' : '同行人 (Others)' }}
+                </el-tag>
+                <span class="p-id-pill">{{ p.passenger_id }}</span>
               </div>
-              <span class="p-id">{{ p.passenger_id }}</span>
+              <div class="p-actions">
+                <el-button size="small" link type="primary" @click="openEditPassengerModal(p)">
+                  <el-icon><Edit /></el-icon> 编辑
+                </el-button>
+                <el-popconfirm
+                  v-if="p.role !== 'self' && String(p.passenger_id) !== '0'"
+                  title="确认要从同行乘车簿中删除该乘客吗？"
+                  confirm-button-text="确定"
+                  cancel-button-text="取消"
+                  @confirm="handleDeletePassenger(p.passenger_id)"
+                >
+                  <template #reference>
+                    <el-button size="small" link type="danger">
+                      <el-icon><Delete /></el-icon> 删除
+                    </el-button>
+                  </template>
+                </el-popconfirm>
+                <span v-else class="self-lock-tip">🔒 锁定</span>
+              </div>
             </div>
 
             <div class="p-docs">
@@ -148,53 +178,137 @@
       </div>
     </div>
 
-    <!-- Edit Profile Drawer -->
+    <!-- Edit Profile Drawer (人性化表单，彻底告别 JSON) -->
     <el-drawer
       v-model="editDrawerVisible"
       title="编辑用户画像与基础偏好"
-      size="500px"
+      size="540px"
       destroy-on-close
     >
-      <el-form label-position="top" class="edit-form">
-        <el-form-item label="常驻居住城市 (home_city)">
-          <el-input v-model="editForm.homeCity" placeholder="例如：上海 / 北京" />
-        </el-form-item>
+      <div class="drawer-form-content">
+        <!-- Section 1: User Context -->
+        <div class="drawer-section-card">
+          <div class="form-section-title">
+            <el-icon><UserFilled /></el-icon>
+            <span>👤 助手全局偏好与约束 (User Context - L1)</span>
+          </div>
 
-        <el-form-item label="默认预算档位 (budget_level)">
-          <el-select v-model="editForm.budgetLevel" class="full-width">
-            <el-option label="经济优先 (economy)" value="economy" />
-            <el-option label="标准舒适 (standard)" value="standard" />
-            <el-option label="尊享商务 (luxury)" value="luxury" />
-          </el-select>
-        </el-form-item>
+          <el-form label-position="top" class="edit-form">
+            <el-form-item label="常驻居住城市 (home_city)">
+              <el-input v-model="editForm.homeCity" placeholder="例如：北京 / 上海" clearable />
+              <div class="form-item-tip">未指定出发地时，系统默认以常驻城市作为行程起点</div>
+            </el-form-item>
 
-        <el-form-item label="全局出行偏好 (JSON 格式)">
-          <el-input
-            v-model="editForm.preferencesJson"
-            type="textarea"
-            :rows="6"
-            placeholder='例如: {"preferred_transport": "train", "seat_preference": "window"}'
-          />
-        </el-form-item>
-      </el-form>
+            <el-form-item label="默认预算档位 (budget_level)">
+              <el-select v-model="editForm.budgetLevel" class="full-width">
+                <el-option label="经济优先 (economy) - 追求低价高性价比" value="economy" />
+                <el-option label="标准舒适 (standard) - 兼顾舒适与耗时" value="standard" />
+                <el-option label="尊享商务 (luxury) - 高品质尊享出行" value="luxury" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="降价监控灵敏度 (price_drop_ratio)">
+              <el-select v-model="editForm.priceDropRatio" class="full-width">
+                <el-option label="降价超过 5% 即提醒 (敏锐推荐)" :value="0.05" />
+                <el-option label="降价超过 10% 提醒 (标准模式)" :value="0.10" />
+                <el-option label="降价超过 20% 提醒 (大幅降价模式)" :value="0.20" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <!-- Section 2: Passenger0 Preferences -->
+        <div class="drawer-section-card">
+          <div class="form-section-title">
+            <el-icon><Guide /></el-icon>
+            <span>🚄 本人常用出行习惯 (Passenger0 Preference - L1/L3)</span>
+          </div>
+
+          <el-form label-position="top" class="edit-form">
+            <el-form-item label="交通工具偏好 (transport)">
+              <div class="pref-grid-group">
+                <div
+                  v-for="opt in transportOptions"
+                  :key="opt.value"
+                  class="pref-choice-card"
+                  :class="{ active: editForm.transport === opt.value }"
+                  @click="editForm.transport = opt.value"
+                >
+                  <div class="choice-icon">{{ opt.icon }}</div>
+                  <div class="choice-text">
+                    <div class="choice-title">{{ opt.title }}</div>
+                    <div class="choice-sub">{{ opt.sub }}</div>
+                  </div>
+                </div>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="发车时段偏好 (time_window)">
+              <div class="pref-grid-group">
+                <div
+                  v-for="opt in timeWindowOptions"
+                  :key="opt.value"
+                  class="pref-choice-card"
+                  :class="{ active: editForm.timeWindow === opt.value }"
+                  @click="editForm.timeWindow = opt.value"
+                >
+                  <div class="choice-icon">{{ opt.icon }}</div>
+                  <div class="choice-text">
+                    <div class="choice-title">{{ opt.title }}</div>
+                    <div class="choice-sub">{{ opt.sub }}</div>
+                  </div>
+                </div>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="座席位置偏好 (seat)">
+              <div class="pref-grid-group">
+                <div
+                  v-for="opt in seatOptions"
+                  :key="opt.value"
+                  class="pref-choice-card"
+                  :class="{ active: editForm.seat === opt.value }"
+                  @click="editForm.seat = opt.value"
+                >
+                  <div class="choice-icon">{{ opt.icon }}</div>
+                  <div class="choice-text">
+                    <div class="choice-title">{{ opt.title }}</div>
+                    <div class="choice-sub">{{ opt.sub }}</div>
+                  </div>
+                </div>
+              </div>
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
 
       <template #footer>
         <div class="drawer-footer">
           <el-button @click="editDrawerVisible = false">取消</el-button>
           <el-button type="primary" :loading="memoryStore.isSaving" @click="saveEdit">
-            保存修改
+            保存偏好配置
           </el-button>
         </div>
       </template>
     </el-drawer>
+
+    <!-- 乘车人新增/编辑弹窗 -->
+    <PassengerModal
+      v-model="showPassengerModal"
+      :passenger-data="activePassenger"
+      @saved="handlePassengerSaved"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Edit, User, UserFilled, MagicStick, Plus, Delete, Guide } from '@element-plus/icons-vue'
 import { useMemoryStore } from '@/stores/memory'
+import { memoryApi } from '@/api/memory'
 import type { UserProfile } from '@/types/memory'
+import PassengerModal from '@/components/chat/PassengerModal.vue'
 
 const props = defineProps<{
   profile: UserProfile | null
@@ -202,21 +316,56 @@ const props = defineProps<{
 
 const memoryStore = useMemoryStore()
 const editDrawerVisible = ref(false)
+const showPassengerModal = ref(false)
+const activePassenger = ref<any>(null)
 
 const editForm = ref({
   homeCity: '',
   budgetLevel: 'standard',
-  preferencesJson: '{}',
+  priceDropRatio: 0.05,
+  transport: 'none',
+  timeWindow: 'none',
+  seat: 'none',
 })
+
+const transportOptions = [
+  { value: 'train', icon: '🚄', title: '高铁优先', sub: '动车/高铁出行' },
+  { value: 'flight', icon: '✈️', title: '机票优先', sub: '航班快速直达' },
+  { value: 'none', icon: '⚖️', title: '综合比选', sub: '智能择优推荐' },
+]
+
+const timeWindowOptions = [
+  { value: 'morning', icon: '🌅', title: '清晨早班', sub: '05:00 - 08:00' },
+  { value: 'afternoon', icon: '☀️', title: '日间适中', sub: '09:00 - 18:00' },
+  { value: 'none', icon: '🕒', title: '全天不限', sub: '全时段智能比选' },
+]
+
+const seatOptions = [
+  { value: 'window', icon: '🪟', title: '靠窗优先', sub: '沿途视野景观佳' },
+  { value: 'aisle', icon: '🚶', title: '靠过道', sub: '出入走动更自如' },
+  { value: 'none', icon: '💺', title: '随意均可', sub: '无特殊位置要求' },
+]
 
 const SYSTEM_COUNTER_KEYS = ['positive_feedback', 'negative_feedback', 'switch_count']
 
 const displayPreferences = computed(() => {
-  if (!props.profile?.preferences) return {}
   const res: Record<string, any> = {}
-  for (const [k, v] of Object.entries(props.profile.preferences)) {
-    if (!SYSTEM_COUNTER_KEYS.includes(k)) {
-      res[k] = v
+  // 1. User L1 / L3 偏好（如降价监控灵敏度）
+  const userV2 = props.profile?.preferences_v2?.user || {}
+  if (userV2.price_drop_ratio?.value !== undefined) {
+    res['price_drop_ratio'] = userV2.price_drop_ratio
+  }
+  // 2. 本人（Passenger0）专属出行偏好
+  const selfV2 = props.profile?.preferences_v2?.passengers?.['0'] || {}
+  for (const [k, v] of Object.entries(selfV2)) {
+    res[k] = v
+  }
+  // 3. 兜底旧版 flat 偏好（排除系统内部打点计数器）
+  if (props.profile?.preferences) {
+    for (const [k, v] of Object.entries(props.profile.preferences)) {
+      if (!SYSTEM_COUNTER_KEYS.includes(k) && !res[k]) {
+        res[k] = v
+      }
     }
   }
   return res
@@ -241,9 +390,10 @@ function formatRuleKey(key: string): string {
     preferred_transport: '交通工具偏好',
     time_window: '出行时段偏好',
     departure_time: '发车时段偏好',
-    seat: '座席偏好',
-    seat_preference: '座席偏好',
+    seat: '座席位置偏好',
+    seat_preference: '座席位置偏好',
     price_sensitivity: '价格敏感度',
+    price_drop_ratio: '降价提醒灵敏度',
     speed_preference: '出行速度偏好',
     avoid_early_morning: '避开清晨早班',
   }
@@ -254,11 +404,21 @@ function formatRuleValue(key: string, rule: any): string {
   const val = (rule && typeof rule === 'object' && rule.value !== undefined) ? rule.value : rule
   if (key === 'transport' || key === 'preferred_transport') {
     if (val === 'train') return '🚄 高铁 / 火车优先'
-    if (val === 'flight') return '✈ 机票 / 航空优先'
+    if (val === 'flight') return '✈️ 机票 / 航空优先'
   }
   if (key === 'time_window') {
     if (val === 'morning') return '🌅 早间时段 (05:00-08:00)'
+    if (val === 'afternoon') return '☀️ 日间适中 (09:00-18:00)'
     if (val === 'night') return '🌙 晚间时段'
+  }
+  if (key === 'seat' || key === 'seat_preference') {
+    if (val === 'window') return '🪟 靠窗优先'
+    if (val === 'aisle') return '🚶 靠过道优先'
+  }
+  if (typeof val === 'number') {
+    if (val === 0.05) return '降价 > 5% 及时提醒 (敏锐推荐)'
+    if (val === 0.1) return '降价 > 10% 提醒'
+    if (val === 0.2) return '降价 > 20% 提醒'
   }
   if (typeof val === 'object') return JSON.stringify(val)
   return String(val)
@@ -285,31 +445,106 @@ function openEditDrawer() {
   if (props.profile) {
     editForm.value.homeCity = props.profile.home_city || ''
     editForm.value.budgetLevel = props.profile.budget_level || 'standard'
-    editForm.value.preferencesJson = JSON.stringify(props.profile.preferences || {}, null, 2)
+
+    const userV2 = props.profile.preferences_v2?.user || {}
+    if (userV2.price_drop_ratio?.value !== undefined) {
+      editForm.value.priceDropRatio = Number(userV2.price_drop_ratio.value)
+    } else {
+      editForm.value.priceDropRatio = 0.05
+    }
+
+    const selfV2 = props.profile.preferences_v2?.passengers?.['0'] || {}
+    editForm.value.transport = selfV2.transport?.value || 'none'
+    editForm.value.timeWindow = selfV2.time_window?.value || 'none'
+    editForm.value.seat = selfV2.seat?.value || 'none'
   }
   editDrawerVisible.value = true
 }
 
 async function saveEdit() {
-  let parsedPrefs: any = {}
   try {
-    parsedPrefs = JSON.parse(editForm.value.preferencesJson || '{}')
-  } catch {
-    ElMessage.error('偏好设置 JSON 格式错误，请检查！')
-    return
-  }
+    const newPrefsV2: Record<string, any> = {
+      user: {
+        ...(props.profile?.preferences_v2?.user || {}),
+        price_drop_ratio: {
+          value: editForm.value.priceDropRatio,
+          source: 'explicit',
+          confidence: 1.0,
+        },
+      },
+      passengers: {
+        ...(props.profile?.preferences_v2?.passengers || {}),
+        '0': {
+          ...(props.profile?.preferences_v2?.passengers?.['0'] || {}),
+        },
+      },
+    }
 
-  try {
+    if (editForm.value.transport !== 'none') {
+      newPrefsV2.passengers['0'].transport = {
+        value: editForm.value.transport,
+        source: 'explicit',
+        confidence: 1.0,
+      }
+    } else {
+      delete newPrefsV2.passengers['0'].transport
+    }
+
+    if (editForm.value.timeWindow !== 'none') {
+      newPrefsV2.passengers['0'].time_window = {
+        value: editForm.value.timeWindow,
+        source: 'explicit',
+        confidence: 1.0,
+      }
+    } else {
+      delete newPrefsV2.passengers['0'].time_window
+    }
+
+    if (editForm.value.seat !== 'none') {
+      newPrefsV2.passengers['0'].seat = {
+        value: editForm.value.seat,
+        source: 'explicit',
+        confidence: 1.0,
+      }
+    } else {
+      delete newPrefsV2.passengers['0'].seat
+    }
+
     await memoryStore.updateProfile({
       home_city: editForm.value.homeCity,
       budget_level: editForm.value.budgetLevel,
-      preferences: parsedPrefs,
+      preferences_v2: newPrefsV2,
     })
-    ElMessage.success('用户画像与偏好已保存！')
+    ElMessage.success('用户画像与出行偏好已成功保存！')
     editDrawerVisible.value = false
   } catch (err: any) {
     ElMessage.error(err?.message || '保存失败')
   }
+}
+
+function openAddPassengerModal() {
+  activePassenger.value = null
+  showPassengerModal.value = true
+}
+
+function openEditPassengerModal(p: any) {
+  activePassenger.value = p
+  showPassengerModal.value = true
+}
+
+async function handleDeletePassenger(pid: string) {
+  try {
+    const updated = await memoryApi.deletePassenger(pid)
+    memoryStore.profile = updated
+    ElMessage.success('已从同行乘客簿中删除该乘车人！')
+  } catch (err: any) {
+    console.error('Delete passenger failed:', err)
+    ElMessage.error(err?.response?.data?.detail || '删除失败，请重试')
+  }
+}
+
+function handlePassengerSaved() {
+  // Modal automatically re-syncs memoryStore.profile
 }
 
 function getPassengerPrefs(pid: string): Record<string, any> | null {
@@ -321,19 +556,11 @@ function getPassengerPrefs(pid: string): Record<string, any> | null {
 }
 
 function formatKey(key: string): string {
-  const map: Record<string, string> = {
-    preferred_transport: '交通工具偏好',
-    seat_preference: '座席偏好',
-    speed_preference: '出行速度偏好',
-    departure_time: '发车时段偏好',
-    avoid_early_morning: '避开清晨早班',
-  }
-  return map[key] || key
+  return formatRuleKey(key)
 }
 
 function formatVal(val: any): string {
-  if (typeof val === 'object') return JSON.stringify(val)
-  return String(val)
+  return formatRuleValue('', val)
 }
 
 function maskIdNo(idNo?: string): string {
@@ -682,6 +909,137 @@ function maskIdNo(idNo?: string): string {
 
 .full-width {
   width: 100%;
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.p-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.p-id-pill {
+  font-size: 11px;
+  color: #94a3b8;
+  font-family: monospace;
+}
+
+.self-lock-tip {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.drawer-form-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 2px 20px 2px;
+}
+
+.drawer-section-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.drawer-section-card .edit-form :deep(.el-form-item:last-child) {
+  margin-bottom: 0;
+}
+
+.form-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.form-item-tip {
+  font-size: 11.5px;
+  color: #64748b;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+/* 3-Column Grid Choice Cards */
+.pref-grid-group {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+
+.pref-choice-card {
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 6px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  user-select: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.pref-choice-card:hover {
+  background: #ffffff;
+  border-color: #93c5fd;
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(37, 99, 235, 0.08);
+}
+
+.pref-choice-card.active {
+  background: #eff6ff;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px #2563eb;
+}
+
+.choice-icon {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.choice-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.choice-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #1e293b;
+  line-height: 1.3;
+}
+
+.pref-choice-card.active .choice-title {
+  color: #1d4ed8;
+}
+
+.choice-sub {
+  font-size: 10px;
+  color: #94a3b8;
+  line-height: 1.2;
+}
+
+.pref-choice-card.active .choice-sub {
+  color: #3b82f6;
 }
 
 .drawer-footer {

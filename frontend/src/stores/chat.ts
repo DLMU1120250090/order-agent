@@ -53,9 +53,12 @@ export const useChatStore = defineStore('chat', () => {
   // Switch to a specific session
   async function switchSession(targetSessionId: string) {
     if (!targetSessionId) return
+    const isSameSession = sessionId.value === targetSessionId && messages.value.length > 0
     sessionId.value = targetSessionId
-    messages.value = []
-    latestTraceId.value = null
+    if (!isSameSession) {
+      messages.value = []
+      latestTraceId.value = null
+    }
 
     try {
       const history = await chatApi.sessionMessages(targetSessionId, 50)
@@ -68,7 +71,8 @@ export const useChatStore = defineStore('chat', () => {
           displayBlocks: item.displayBlocks || item.display_blocks || [],
           traceId: item.agent_trace_id || item.traceId,
           responseType: item.responseType || (item.intent === 'CLARIFY_NEEDED' ? 'CLARIFY' : (item.intent === 'PLAN_RECOMMENDATION' ? 'PLAN_RECOMMENDATION' : 'ANSWER')),
-          missingSlots: item.missingSlots || (item.intent === 'CLARIFY_NEEDED' ? ['transportMode', 'budget', 'tripDate'] : []),
+          missingSlots: item.missingSlots || [],
+          confirmFields: item.confirmFields || [],
           clarifyQuestion: item.clarifyQuestion || (item.intent === 'CLARIFY_NEEDED' ? (item.content || item.text) : undefined),
         }))
 
@@ -76,6 +80,8 @@ export const useChatStore = defineStore('chat', () => {
         const lastWithTrace = [...history].reverse().find(m => m.agent_trace_id || m.traceId)
         if (lastWithTrace) {
           latestTraceId.value = lastWithTrace.agent_trace_id || lastWithTrace.traceId
+        } else if (!isSameSession) {
+          latestTraceId.value = null
         }
       }
 
@@ -236,6 +242,7 @@ export const useChatStore = defineStore('chat', () => {
         responseType: resp.responseType,
         displayBlocks: resp.displayBlocks || [],
         missingSlots: resp.missingSlots || [],
+        confirmFields: resp.confirmFields || [],
         clarifyQuestion: resp.clarifyQuestion,
         taskId: resp.taskId,
         orderNo: resp.orderNo,

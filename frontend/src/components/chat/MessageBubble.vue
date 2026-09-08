@@ -29,8 +29,9 @@
       <!-- Attached Cards -->
       <!-- 1. Clarification Card -->
       <ClarifyCard
-        v-if="message.responseType === 'CLARIFY' || (message.missingSlots && message.missingSlots.length > 0)"
+        v-if="message.responseType === 'CLARIFY' || (message.missingSlots && message.missingSlots.length > 0) || (message.confirmFields && message.confirmFields.length > 0)"
         :missing-slots="message.missingSlots"
+        :confirm-fields="message.confirmFields"
         :question="message.clarifyQuestion"
       />
 

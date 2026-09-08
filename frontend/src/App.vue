@@ -50,7 +50,11 @@
 
     <!-- Main View Viewport -->
     <main class="main-content">
-      <router-view />
+      <router-view v-slot="{ Component }">
+        <keep-alive include="ChatView,Chat">
+          <component :is="Component" />
+        </keep-alive>
+      </router-view>
     </main>
   </div>
 </template>

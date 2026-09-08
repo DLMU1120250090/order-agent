@@ -57,6 +57,15 @@
             </div>
           </div>
         </div>
+
+        <!-- Passengers inside order -->
+        <div v-if="order.passengers && order.passengers.length > 0" class="order-passengers-row">
+          <span class="p-label">乘车人:</span>
+          <span class="p-names">
+            {{ order.passengers.map((p: any) => typeof p === 'string' ? p : (p.name || '乘客')).join('、') }}
+            ({{ order.passengers.length }}人)
+          </span>
+        </div>
       </div>
     </div>
 
@@ -294,6 +303,26 @@ function getStatusLabel(status: string): string {
 .arrow-sym {
   color: #94a3b8;
   font-size: 10px;
+}
+
+.order-passengers-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #f1f5f9;
+  font-size: 11px;
+}
+
+.p-label {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.p-names {
+  color: #0f172a;
+  font-weight: 500;
 }
 
 .order-list-footer {
