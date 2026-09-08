@@ -15,6 +15,7 @@ logs/
 /memory/
 backend/memory/
 *.log
+backend/*.db
 
 # 本地历史与编辑器
 .history/
