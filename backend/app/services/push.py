@@ -19,6 +19,7 @@ class SseHub:
 
     def __init__(self):
         self._queues: Dict[int, asyncio.Queue] = defaultdict(asyncio.Queue)
+        self._stopped = False
 
     def subscribe(self, user_id: int) -> asyncio.Queue:
         return self._queues[user_id]
@@ -34,15 +35,38 @@ class SseHub:
     def remove(self, user_id: int):
         self._queues.pop(user_id, None)
 
-    async def stream(self, user_id: int):
-        """SSE 事件流生成器：每个事件一行 data: {json}"""
-        q = self.subscribe(user_id)
-        while True:
+    def stop(self):
+        """服务器关闭/热重载时，优雅唤醒并退出所有挂起的 SSE 协程"""
+        self._stopped = True
+        for q in list(self._queues.values()):
             try:
-                event = await asyncio.wait_for(q.get(), timeout=25)
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            except asyncio.TimeoutError:
-                yield ": keep-alive\n\n"
+                q.put_nowait(None)
+            except Exception:
+                pass
+
+    async def stream(self, user_id: int, request=None):
+        """SSE 事件流生成器：每个事件一行 data: {json}"""
+        self._stopped = False
+        q = self.subscribe(user_id)
+        try:
+            while not self._stopped:
+                if request is not None:
+                    try:
+                        if await request.is_disconnected():
+                            break
+                    except Exception:
+                        pass
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=10)
+                    if event is None or self._stopped:
+                        break
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    if self._stopped:
+                        break
+                    yield ": keep-alive\n\n"
+        finally:
+            self.remove(user_id)
 
 
 class PushService:

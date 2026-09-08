@@ -165,19 +165,63 @@ async def list_episodes(
     return episodes
 
 
+@memory_router.get("/events")
+async def list_user_events(
+    limit: int = 50,
+    x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取操作者决策行为事件列表（User L2 Events）"""
+    from sqlalchemy import select, desc
+    from app.models.database import UserMemoryEventRow
+
+    safe_limit = max(1, min(100, limit))
+    stmt = (
+        select(UserMemoryEventRow)
+        .where(UserMemoryEventRow.user_id == x_user_id)
+        .order_by(desc(UserMemoryEventRow.created_at))
+        .limit(safe_limit)
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    events = []
+    for r in rows:
+        events.append({
+            "id": r.id,
+            "userId": r.user_id,
+            "eventType": r.event_type,
+            "sessionId": r.session_id,
+            "taskId": r.task_id,
+            "traceId": r.trace_id,
+            "orderNo": r.order_no,
+            "context": r.context or {},
+            "result": r.result or {},
+            "createdAt": r.created_at.isoformat() if r.created_at else None,
+        })
+    return events
+
+
 @memory_router.get("/distill")
 async def get_distill_report(
     x_user_id: int = Header(default=1, alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
 ):
-    """获取用户 L3 偏好蒸馏 Markdown 报告"""
+    """获取用户 L3 偏好蒸馏 Markdown 报告与结构化偏好"""
     import os
     path = memory._l3_path(x_user_id)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
     else:
-        content = f"# 用户偏好蒸馏（L3）\n\n暂无针对用户 {x_user_id} 的偏好蒸馏记录。"
-    return {"userId": x_user_id, "content": content}
+        content = f"# 用户与乘车人偏好蒸馏（L3）\n\n暂无针对用户 {x_user_id} 的偏好蒸馏记录。"
+
+    profile = await memory.get_profile(db, x_user_id)
+    preferences_v2 = (profile.preferences_v2 if profile else {}) or {}
+    return {
+        "userId": x_user_id,
+        "content": content,
+        "preferencesV2": preferences_v2,
+    }
 
 
 @memory_router.post("/distill")
@@ -185,9 +229,15 @@ async def trigger_distill(
     x_user_id: int = Header(default=1, alias="X-User-Id"),
     db: AsyncSession = Depends(get_db),
 ):
-    """手动触发当前用户的 L3 偏好蒸馏并刷新报告"""
+    """手动触发当前用户的 L3 偏好蒸馏并刷新报告与结构化偏好"""
     try:
         content = await memory.distill(db, x_user_id)
     except Exception as e:
-        content = f"# 用户偏好蒸馏（L3）\n\n蒸馏执行异常或无近期行程更新: {e}"
-    return {"userId": x_user_id, "content": content}
+        content = f"# 用户与乘车人偏好蒸馏（L3）\n\n蒸馏执行异常或无近期行程更新: {e}"
+    profile = await memory.get_profile(db, x_user_id)
+    preferences_v2 = (profile.preferences_v2 if profile else {}) or {}
+    return {
+        "userId": x_user_id,
+        "content": content,
+        "preferencesV2": preferences_v2,
+    }

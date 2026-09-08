@@ -78,6 +78,8 @@ async def lifespan(app: FastAPI):
     yield
     dingtalk_stream_service.stop()
     scheduler.shutdown()
+    from app.services.runtime import push_service
+    push_service.hub.stop()
 
 
 # 初始化 FastAPI 应用程序

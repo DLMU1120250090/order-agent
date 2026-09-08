@@ -1,5 +1,6 @@
 """Mock 供应商（模拟数据）：收银台支付状态存储，供三层支付检测的第 2 层轮询使用。"""
 
+import asyncio
 import logging
 import threading
 from datetime import datetime
@@ -15,6 +16,13 @@ class MockSupplierService:
     def __init__(self):
         self._lock = threading.Lock()
         self._orders: Dict[str, dict] = {}
+        self._paid_events: Dict[str, asyncio.Event] = {}
+
+    def get_paid_event(self, order_no: str) -> asyncio.Event:
+        with self._lock:
+            if order_no not in self._paid_events:
+                self._paid_events[order_no] = asyncio.Event()
+            return self._paid_events[order_no]
 
     def register(self, order_no: str) -> dict:
         with self._lock:
@@ -27,6 +35,12 @@ class MockSupplierService:
                 row["status"] = "PAID"
                 row["paid_at"] = datetime.now().isoformat()
                 log.info("Mock 供应商收到支付: order_no=%s", order_no)
+            ev = self._paid_events.get(order_no)
+            if ev:
+                try:
+                    ev.set()
+                except Exception:
+                    pass
             return row
 
     def get_status(self, order_no: str) -> str:

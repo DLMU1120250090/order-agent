@@ -77,6 +77,7 @@ class TaskService:
             fields["status"] = status
         row = await task_crud.update_task(db, task_id, **fields)
         if row:
+            order_no = (row.params or {}).get("order_no") or (row.result or {}).get("order_no")
             self._record("TASK_PROGRESS", "TASK", {"taskId": task_id, "progress": row.progress, "status": row.status})
             await self.push_service.push(
                 row.user_id,
@@ -84,7 +85,7 @@ class TaskService:
                     kind="TASK_PROGRESS",
                     channel=row.channel,
                     text=text or f"任务进行中（{row.progress}%）",
-                    task_progress={"taskId": row.task_id, "status": row.status, "progress": row.progress},
+                    task_progress={"taskId": row.task_id, "status": row.status, "progress": row.progress, "orderNo": order_no},
                     correlation_id=row.task_id,
                 ),
             )
@@ -98,6 +99,7 @@ class TaskService:
             progress=80,
         )
         if row:
+            order_no = (row.params or {}).get("order_no") or (row.result or {}).get("order_no")
             self._record("TASK_WAITING_USER", "TASK", {"taskId": task_id, "pending": pending, "text": text[:200]})
             await self.push_service.push(
                 row.user_id,
@@ -105,7 +107,7 @@ class TaskService:
                     kind="TASK_PROGRESS",
                     channel=row.channel,
                     text=text,
-                    task_progress={"taskId": row.task_id, "status": row.status, "progress": 80, "pending": pending},
+                    task_progress={"taskId": row.task_id, "status": row.status, "progress": 80, "pending": pending, "orderNo": order_no},
                     correlation_id=row.task_id,
                 ),
             )

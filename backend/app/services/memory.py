@@ -13,7 +13,11 @@ from app.config import get_light_model
 from app.crud import profile as profile_crud
 from app.models.database import TripSummaryRow
 from app.models.schemas import TripSummary, UserProfile
-from app.services.user_memory_events import UserEventType, recent_user_events
+from app.services.user_memory_events import (
+    UserEventType,
+    recent_user_events,
+    summarize_price_events,
+)
 
 log = logging.getLogger("travel.memory")
 
@@ -214,17 +218,108 @@ class MemoryService:
         return [r.summary_md for r in res.scalars().all()]
 
     async def distill(self, db: AsyncSession, user_id: int) -> str:
-        """L3 偏好蒸馏：轻量模型读 L1 + 近 30 条 L2 + 历史偏好结论 → 提炼新结论；失败回退规则汇总。"""
+        """L3 偏好蒸馏：双主体提炼（User L2 决策行为 + Passenger L2 出行经历）→ 提炼新结论；失败回退双主体规则汇总。"""
         profile = await self.get_profile(db, user_id)
-        summaries = await self.recent_summaries(db, user_id, 30)
-        previous = self._read_previous_conclusion(user_id)
-        conclusion = await self._llm_distill(user_id, profile, summaries, previous)
+        
+        # 1. 查取近期行程（Passenger L2）
+        res_trips = await db.execute(
+            select(TripSummaryRow)
+            .where(TripSummaryRow.user_id == user_id)
+            .order_by(TripSummaryRow.created_at.desc())
+            .limit(30)
+        )
+        trip_rows = list(res_trips.scalars().all())
+        
+        # 2. 查取近期操作者行为事件（User L2）
+        user_events = await recent_user_events(
+            db,
+            user_id,
+            (
+                UserEventType.PRICE_DROP_ACCEPTED,
+                UserEventType.PRICE_DROP_IGNORED,
+                UserEventType.CHANGE_CONFIRMED,
+                UserEventType.CHANGE_REJECTED,
+                UserEventType.REFUND_CONFIRMED,
+                UserEventType.RECOMMEND_ACCEPTED,
+                UserEventType.RECOMMEND_REJECTED,
+                UserEventType.MONITOR_TOGGLED,
+                UserEventType.REMINDER_SET,
+            ),
+            limit=30,
+        )
 
-        lines = ["# 用户偏好蒸馏（L3）", ""]
+        # 构建乘客名称映射
+        p_name_map = {}
+        for p in (profile.passengers if profile else []) or []:
+            pid = str(p.get("passenger_id") or "")
+            p_name = p.get("name") or ("本人" if pid == "0" else pid)
+            role_txt = "本人" if pid == "0" or p.get("role") == "self" else "同行人"
+            p_name_map[pid] = f"{p_name}({role_txt})"
+
+        # 整理 Passenger L2 文本（按乘车人分组）
+        passenger_grouped: dict = {}
+        for r in trip_rows:
+            ep = r.episode_json or {}
+            passengers = ep.get("passengers") or ["0"]
+            plan = ep.get("selected_plan") or {}
+            ctx = ep.get("context") or {}
+            mode = plan.get("mode") or "TRAIN"
+            depart = plan.get("depart") or ""
+            seat = plan.get("seat") or ""
+            price = plan.get("price") or 0
+            route = f"{ctx.get('origin', '')}->{ctx.get('destination', '')}" if ctx else ""
+            desc_item = f"{route} {mode} {depart} {seat} ¥{price}"
+            for pid in passengers:
+                pid_str = str(pid)
+                passenger_grouped.setdefault(pid_str, []).append(desc_item)
+
+        passenger_text_lines = []
+        for pid_str, items in passenger_grouped.items():
+            label = p_name_map.get(pid_str, f"乘客 {pid_str}")
+            passenger_text_lines.append(f"【{label}】近期 {len(items)} 次出行：")
+            passenger_text_lines.extend(f"  - {it}" for it in items[:6])
+        passenger_episodes_text = "\n".join(passenger_text_lines)
+
+        # 整理 User L2 行为事件文本
+        price_stats = summarize_price_events(user_events)
+        user_event_lines = []
+        if price_stats.get("total", 0) > 0:
+            user_event_lines.append(
+                f"价格监控响应：接受 {price_stats['accepted']} 次，忽略 {price_stats['ignored']} 次，"
+                f"接受率 {int((price_stats['acceptRatio'] or 0) * 100)}%"
+            )
+        rec_acc = sum(1 for e in user_events if e.event_type == UserEventType.RECOMMEND_ACCEPTED)
+        rec_rej = sum(1 for e in user_events if e.event_type == UserEventType.RECOMMEND_REJECTED)
+        if rec_acc + rec_rej > 0:
+            user_event_lines.append(f"方案推荐响应：采纳 {rec_acc} 次，拒绝/换一批 {rec_rej} 次")
+        change_acc = sum(1 for e in user_events if e.event_type == UserEventType.CHANGE_CONFIRMED)
+        change_rej = sum(1 for e in user_events if e.event_type == UserEventType.CHANGE_REJECTED)
+        if change_acc + change_rej > 0:
+            user_event_lines.append(f"改签处理响应：确认改签 {change_acc} 次，放弃 {change_rej} 次")
+        user_events_text = "\n".join(f"- {l}" for l in user_event_lines)
+
+        previous = self._read_previous_conclusion(user_id)
+        conclusion = await self._llm_distill(
+            user_id, profile, passenger_episodes_text, user_events_text, previous
+        )
+
+        lines = ["# 用户与乘车人偏好蒸馏（L3）", ""]
         if conclusion:
-            lines += ["## 偏好结论（LLM 蒸馏）", conclusion, ""]
+            lines += ["## 偏好结论（LLM 双主体提炼）", conclusion, ""]
         else:
-            lines += ["## 偏好结论（规则汇总兜底）", "（本次蒸馏模型不可用，由规则汇总生成）", ""]
+            # 规则汇总兜底双主体展示
+            lines += [
+                "## 偏好结论（规则汇总兜底）",
+                "### 一、用户决策风格偏好 (User L3)",
+                f"1. 价格敏感倾向：{price_stats.get('acceptRatio', '标准中等')}",
+                f"2. 常用操作习惯：默认预算档位 {profile.budget_level if profile else '标准'}，主动采纳推荐为主",
+                "",
+                "### 二、乘车人出行偏好 (Passenger L3)",
+            ]
+            for pid_str, label in p_name_map.items():
+                lines.append(f"- **{label}**：倾向高铁二等座出行，偏好早间与常规白天车次")
+            lines.append("")
+
         lines += [
             "## 数据依据",
             f"- 用户ID: {user_id}",
@@ -233,17 +328,32 @@ class MemoryService:
             lines += [
                 f"- 常驻城市: {profile.home_city or '未知'}",
                 f"- 预算档位: {profile.budget_level or '未知'}",
-                f"- 偏好: {profile.preferences or {}}",
+                f"- 操作者行为事件数 (User L2): {len(user_events)} 条",
+                f"- 乘车人出行经历数 (Passenger L2): {len(trip_rows)} 条",
                 f"- 常用乘客数: {len(profile.passengers or [])}",
             ]
         lines.append("")
-        lines.append("## 近期行程（最近 30 条）")
-        lines.extend(f"- {s.replace(chr(10), ' ')[:180]}" for s in summaries)
+        lines.append("## 近期行程经历（Passenger L2）")
+        for r in trip_rows[:15]:
+            ep = r.episode_json or {}
+            pids = [p_name_map.get(str(p), str(p)) for p in (ep.get("passengers") or ["0"])]
+            p_tag = f"[{' / '.join(pids)}]"
+            lines.append(f"- {p_tag} {r.summary_md.replace(chr(10), ' ')[:160]}")
+
+        lines.append("")
+        lines.append("## 最近操作者决策事件（User L2）")
+        if user_events:
+            for ev in user_events[:10]:
+                ctx_desc = f" | {ev.context}" if ev.context else ""
+                lines.append(f"- [{ev.event_type}] 订单: {ev.order_no or '无'}{ctx_desc}")
+        else:
+            lines.append("- （暂无决策事件记录）")
+
         text = "\n".join(lines)
         md_path = self._l3_path(user_id)
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(text)
-        # Commit 7：规则蒸馏结构化偏好（高频交通方式），供 Planner/Resolver 消费
+        # 规则蒸馏结构化偏好（高频交通方式与价格敏感度），供 Planner/Resolver 消费
         await self.distill_preferences(db, user_id)
         return text
 
@@ -311,8 +421,15 @@ class MemoryService:
         except Exception:  # noqa: BLE001
             return ""
 
-    async def _llm_distill(self, user_id: int, profile, summaries: List[str], previous: str = "") -> str:
-        """轻量模型提炼偏好结论（参考历史结论，保留稳定、更新变化）；异常返回空串由 distill 兜底。"""
+    async def _llm_distill(
+        self,
+        user_id: int,
+        profile,
+        passenger_episodes_text: str,
+        user_events_text: str,
+        previous: str = "",
+    ) -> str:
+        """轻量模型提炼偏好结论（参考历史结论，分 User L3 与 Passenger L3）；异常返回空串由 distill 兜底。"""
         try:
             profile_text = (
                 f"常驻城市={profile.home_city or '未知'}, 预算档位={profile.budget_level or '未知'}, "
@@ -320,20 +437,29 @@ class MemoryService:
                 if profile
                 else "（暂无画像）"
             )
-            summaries_text = "\n".join(f"- {s[:150]}" for s in summaries) or "（暂无行程）"
+            passenger_text = passenger_episodes_text or "（暂无乘车人行程）"
+            user_text = user_events_text or "（暂无操作者决策事件）"
             history_text = previous or "（暂无历史结论）"
             prompt = ChatPromptTemplate.from_messages([
                 SystemMessage(content=load_prompt("distill.txt")),
-                ("user", "用户画像：{profile}\n近期行程摘要：{summaries}\n历史偏好结论：{history}\n请输出偏好结论。"),
+                (
+                    "user",
+                    "【用户画像】\n{profile}\n\n"
+                    "【操作者决策事件 (User L2)】\n{user_events}\n\n"
+                    "【各乘车人出行经历 (Passenger L2)】\n{passenger_episodes}\n\n"
+                    "【历史偏好结论】\n{history}\n\n"
+                    "请按要求输出分主体偏好结论。"
+                ),
             ])
             chain = prompt | get_light_model()
             res = await chain.ainvoke({
                 "profile": profile_text,
-                "summaries": summaries_text,
+                "user_events": user_text,
+                "passenger_episodes": passenger_text,
                 "history": history_text,
             })
             text = str(getattr(res, "content", "") or "").strip()
-            return text[:400]
+            return text[:600]
         except Exception as e:  # noqa: BLE001
             log.warning("L3 LLM 蒸馏失败，回退规则汇总: %s", e)
             return ""

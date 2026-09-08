@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     TRAVEL_QWEATHER_CREDENTIAL_ID: str = ""
     # 携程浏览器自动化持久化登录目录
     TRAVEL_CTRIP_USER_DATA_DIR: str = ""
-    # 真实携程自动化开关：默认开启；优先尝试真实携程，被反爬/登录墙拦截或页面未适配时自动回退 Mock 收银台
-    TRAVEL_CTRIP_REAL_ENABLED: bool = True
+    # 真实携程自动化开关：默认关闭（默认走内置 Mock 收银台，避免启动真实桌面浏览器打扰；需真实携程测试时开启）
+    TRAVEL_CTRIP_REAL_ENABLED: bool = False
     # 携程国内机票频道入口
     TRAVEL_CTRIP_BASE_URL: str = "https://flights.ctrip.com/online/channel/domestic"
     # 真实携程模式默认显式打开浏览器（非无头），模拟真人操作；无头模式实测被 whaleguard 拦截
@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     TRAVEL_PLAYWRIGHT_HEADLESS: bool = True
     TRAVEL_PLAYWRIGHT_USER_DATA_DIR: str = ""  # 空则默认 memory/playwright/ctx（持久化登录态）
     # Mock 收银台地址（演示环境指向本服务自身）
-    TRAVEL_MOCK_CHECKOUT_BASE_URL: str = "http://127.0.0.1:8090"
+    TRAVEL_MOCK_CHECKOUT_BASE_URL: str = "http://127.0.0.1:8000"
     TRAVEL_MOCK_CHECKOUT_AUTO_PAY_SECONDS: int = 8  # Mock 页面自动模拟支付秒数（演示三层检测用）
     TRAVEL_PAYMENT_POLL_SECONDS_FAST: float = 30.0  # 第2层：前 2 分钟轮询间隔（30s）
     TRAVEL_PAYMENT_POLL_SECONDS_SLOW: float = 90.0  # 第2层：2 分钟后的轮询间隔（1~2 分钟）

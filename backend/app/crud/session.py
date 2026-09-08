@@ -32,6 +32,7 @@ def parse_slots_and_meta(slots_val: Any) -> Tuple[TravelSlotBundle, Dict[str, An
         travelStyle=slots_val.get("travelStyle") or [],
         transportMode=slots_val.get("transportMode") or [],
         companion=slots_val.get("companion") or [],
+        passengers=slots_val.get("passengers") or [],
     )
     return bundle, meta
 
@@ -238,6 +239,8 @@ async def recent_conversation_turns(
         display_blocks = []
         turn_missing_slots = None
         turn_confirm_fields = None
+        turn_order_no = None
+        turn_task_id = None
         if r.role == "assistant" and r.agent_trace_id and r.agent_trace_id in trace_map:
             t_row = trace_map[r.agent_trace_id]
             t_json = t_row.trace_json
@@ -259,7 +262,7 @@ async def recent_conversation_turns(
                                     turn_confirm_fields = c_payload.get("confirmFields") or []
                         except Exception:
                             pass
-                    if ev.get("eventType") == "REQUEST_FINISHED" and ev.get("outputPayload"):
+                    if ev.get("eventType") in ("REQUEST_FINISHED", "RESPONSE_READY") and ev.get("outputPayload"):
                         try:
                             payload = json.loads(ev["outputPayload"]) if isinstance(ev["outputPayload"], str) else ev["outputPayload"]
                             if isinstance(payload, dict):
@@ -267,6 +270,17 @@ async def recent_conversation_turns(
                                     display_blocks = payload["blocks"]
                                 if payload.get("kind") == "CLARIFY":
                                     resp_type = "CLARIFY"
+                                elif payload.get("kind") == "TASK_PROGRESS":
+                                    resp_type = "TASK_PROGRESS"
+                                    tp = payload.get("task_progress") or {}
+                                    turn_order_no = tp.get("orderNo") or turn_order_no
+                                    turn_task_id = tp.get("taskId") or payload.get("correlation_id") or turn_task_id
+                                elif payload.get("kind") == "CARD":
+                                    resp_type = "CARD"
+                                    if payload.get("blocks"):
+                                        b0 = payload["blocks"][0]
+                                        if isinstance(b0, dict) and b0.get("orderNo"):
+                                            turn_order_no = b0.get("orderNo") or turn_order_no
                         except Exception:
                             pass
 
@@ -278,6 +292,8 @@ async def recent_conversation_turns(
             "agent_trace_id": r.agent_trace_id,
             "responseType": resp_type if r.role == "assistant" else None,
             "displayBlocks": display_blocks,
+            "orderNo": turn_order_no,
+            "taskId": turn_task_id,
             "createdAt": epoch_ms,
         }
         if r.role == "assistant" and (resp_type == "CLARIFY" or r.intent == "CLARIFY_NEEDED"):

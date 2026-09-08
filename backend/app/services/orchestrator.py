@@ -89,11 +89,16 @@ def resolve_passenger_choice(text: str, profile) -> Optional[str]:
     t = (text or "").strip().strip("。！!？?，, ")
     if not t:
         return None
-    if t in ("0", "本人", "自己", "我自己", "给我自己", "我") or t.startswith("本人"):
-        return "0"
+    self_p = _self_passenger(profile)
+    self_id = str(self_p.get("passenger_id") or "0") if self_p else "0"
+    self_name = str(self_p.get("name") or "") if self_p else ""
+    if t in ("0", "本人", "自己", "我自己", "给我自己", "我") or t.startswith("本人") or "本人" in t:
+        return self_id
+    if self_name and (self_name in t or t in self_name):
+        return self_id
     others = _other_passengers(profile)
     if not others:
-        return "0"
+        return self_id
     # 编号：1/2/3 或 第N个
     m = re.fullmatch(r"第?(\d+|[一二三四五六七八九十]+)个?", t)
     if m:
@@ -119,12 +124,18 @@ def resolve_passenger_choices(text: str, profile) -> List[str]:
     t = (text or "").strip()
     results = []
     others = _other_passengers(profile)
-    # 本人
-    if any(k in t for k in ("本人", "自己", "我自己", "给我自己")) or t == "0":
-        results.append("0")
+    self_p = _self_passenger(profile)
+    self_id = str(self_p.get("passenger_id") or "0") if self_p else "0"
+    self_name = str(self_p.get("name") or "") if self_p else ""
+
+    # 本人或本人姓名
+    if any(k in t for k in ("本人", "自己", "我自己", "给我自己", "1人", "单人", "一个人")) or t == "0" or (self_name and self_name in t):
+        if self_id not in results:
+            results.append(self_id)
     # 全部
     if any(k in t for k in ("全部", "所有人", "都去", "全去", "全选")):
-        results.append("0")
+        if self_id not in results:
+            results.append(self_id)
         for p in others:
             pid = str(p.get("passenger_id") or "")
             if pid and pid not in results:
@@ -147,6 +158,57 @@ def resolve_passenger_choices(text: str, profile) -> List[str]:
     return results
 
 
+def resolve_passenger_ids_from_slots(slots_passengers, profile) -> List[str]:
+    """从槽位 passengers 列表中解析出对应的 passenger_id 列表。"""
+    if not profile or not slots_passengers:
+        return []
+    if isinstance(slots_passengers, str):
+        raw_list = [slots_passengers]
+    elif isinstance(slots_passengers, (list, tuple, set)):
+        raw_list = list(slots_passengers)
+    else:
+        return []
+
+    results: List[str] = []
+    all_passengers = profile.passengers or []
+    self_p = _self_passenger(profile)
+    self_id = str(self_p.get("passenger_id") or "0") if self_p else "0"
+    self_name = str(self_p.get("name") or "") if self_p else ""
+
+    for item in raw_list:
+        if not item:
+            continue
+        item_str = str(item).strip()
+        # 1. 尝试使用 resolve_passenger_choices 解析
+        p_ids = resolve_passenger_choices(item_str, profile)
+        for pid in p_ids:
+            if pid not in results:
+                results.append(pid)
+        if p_ids:
+            continue
+
+        # 2. 单项匹配
+        single_id = resolve_passenger_choice(item_str, profile)
+        if single_id and single_id not in results:
+            results.append(single_id)
+            continue
+
+        # 3. 关键字兜底（本人/自己/单人/1人等）
+        if any(k in item_str for k in ("本人", "自己", "我", "1人", "单人", "一个人")) or (self_name and self_name in item_str):
+            if self_id not in results:
+                results.append(self_id)
+
+        # 4. 遍历所有乘客 ID 或姓名包含匹配
+        for p in all_passengers:
+            pid = str(p.get("passenger_id") or "")
+            name = str(p.get("name") or "")
+            if pid and (item_str == pid or (name and (name in item_str or item_str in name))):
+                if pid not in results:
+                    results.append(pid)
+
+    return results
+
+
 def passenger_selection_question(profile) -> str:
     others = _other_passengers(profile)
     if not others:
@@ -165,6 +227,11 @@ def passenger_selection_gate(profile, state) -> str:
         return "ASK"
     if state.passengerSelectionDone:
         return state.currentPassengerId or "0"
+    # 如果已从槽位或上下文获得了乘客信息，直接放行，避免重复询问
+    if state.slots and state.slots.passengers:
+        resolved = resolve_passenger_ids_from_slots(state.slots.passengers, profile)
+        if resolved:
+            return resolved[0]
     return "ASK"
 
 
@@ -434,9 +501,15 @@ class TravelOrchestratorService:
                 context={"planId": rejected, "action": action, "reason": text[:100]},
             )
 
-        merged = self._merge_slots(state.slots, revised.slots)
+        # 订单/会话生命周期：若用户主动表达重新规划、或者在 ORDER（已成单）阶段开启新规划，清空上一笔订单的历史槽位
+        is_reset = any(kw in text for kw in ("重新规划", "重新来", "重新选", "重头开始", "重置"))
+        is_new_plan_from_order = (state.phase == SessionPhase.ORDER and not adjust)
+        clean_start = is_reset or is_new_plan_from_order
+
+        history_slots = TravelSlotBundle() if clean_start else state.slots
+        merged = self._merge_slots(history_slots, revised.slots)
         merged, fuzzy = await self._resolve_dates(db, merged)
-        ctx.record_event("SLOTS_MERGED", "SLOT", {"stateSlots": state.slots.model_dump(), "intentSlots": revised.slots.model_dump()}, merged.model_dump())
+        ctx.record_event("SLOTS_MERGED", "SLOT", {"stateSlots": history_slots.model_dump(), "intentSlots": revised.slots.model_dump()}, merged.model_dump())
 
         # Commit 2：Memory Resolver —— L1/L3 补全缺失字段并标记来源；高影响推断字段需确认
         profile = await self.memory.get_profile(db, user_id)
@@ -472,11 +545,21 @@ class TravelOrchestratorService:
                 missing.append("tripDate")
                 ctx.record_event("DATE_CONFLICT_CHECKED", "CLARIFY", merged.tripDate, {"ok": False, "reason": reason})
             question = await self._ask_clarify(db, state, ctx, agent_set, text, merged, missing)
+            p_ids = resolve_passenger_ids_from_slots(merged.passengers, profile) if merged.passengers else []
             clarify_state = state.model_copy(update={
                 "phase": SessionPhase.CLARIFY,
                 "currentIntent": Intent.CLARIFY_NEEDED,
                 "slots": merged,
                 "pendingConfirms": [],
+                "orderNo": None if clean_start else state.orderNo,
+                "orderId": None if clean_start else state.orderId,
+                "lastRecommendations": [] if clean_start else state.lastRecommendations,
+                "currentBatch": [] if clean_start else state.currentBatch,
+                "selectedPlanId": None if clean_start else state.selectedPlanId,
+                "passengerSelectionPending": False,
+                "passengerSelectionDone": bool(p_ids) if clean_start else (state.passengerSelectionDone or bool(p_ids)),
+                "currentPassengerId": p_ids[0] if p_ids else (None if clean_start else state.currentPassengerId),
+                "currentPassengerIds": p_ids if p_ids else ([] if clean_start else state.currentPassengerIds),
             })
             await self._save_state(db, clarify_state)
             msg = OutboundMessage(
@@ -492,11 +575,21 @@ class TravelOrchestratorService:
         # Commit 2：高影响推断字段需显式确认（记忆辅助澄清，不替用户决定）
         if resolved.pending_confirm:
             question = self._memory_confirm_question(resolved)
+            p_ids = resolve_passenger_ids_from_slots(merged.passengers, profile) if merged.passengers else []
             confirm_state = state.model_copy(update={
                 "phase": SessionPhase.CLARIFY,
                 "currentIntent": Intent.CLARIFY_NEEDED,
                 "slots": merged,
                 "pendingConfirms": resolved.pending_confirm,
+                "orderNo": None if clean_start else state.orderNo,
+                "orderId": None if clean_start else state.orderId,
+                "lastRecommendations": [] if clean_start else state.lastRecommendations,
+                "currentBatch": [] if clean_start else state.currentBatch,
+                "selectedPlanId": None if clean_start else state.selectedPlanId,
+                "passengerSelectionPending": False,
+                "passengerSelectionDone": bool(p_ids) if clean_start else (state.passengerSelectionDone or bool(p_ids)),
+                "currentPassengerId": p_ids[0] if p_ids else (None if clean_start else state.currentPassengerId),
+                "currentPassengerIds": p_ids if p_ids else ([] if clean_start else state.currentPassengerIds),
             })
             await self._save_state(db, confirm_state)
             msg = OutboundMessage(
@@ -541,14 +634,21 @@ class TravelOrchestratorService:
         )
 
         plan_ids = [o.plan_id for o in decision.options]
+        p_ids = resolve_passenger_ids_from_slots(planning_slots.passengers, profile) if planning_slots.passengers else []
         new_state = state.model_copy(update={
             "phase": SessionPhase.PLAN,
             "currentIntent": Intent.PLAN_RECOMMENDATION,
             "slots": planning_slots,
-            "lastRecommendations": list(state.lastRecommendations) + plan_ids,
+            "lastRecommendations": plan_ids if clean_start else (list(state.lastRecommendations) + plan_ids),
             "currentBatch": plan_ids,
             "selectedPlanId": decision.recommended.plan_id if decision.recommended else (plan_ids[0] if plan_ids else None),
             "pendingConfirms": [],
+            "orderNo": None if clean_start else state.orderNo,
+            "orderId": None if clean_start else state.orderId,
+            "passengerSelectionPending": False,
+            "passengerSelectionDone": bool(p_ids) if clean_start else (state.passengerSelectionDone or bool(p_ids)),
+            "currentPassengerId": p_ids[0] if p_ids else (None if clean_start else state.currentPassengerId),
+            "currentPassengerIds": p_ids if p_ids else ([] if clean_start else state.currentPassengerIds),
         })
         await self._save_state(db, new_state)
         msg = OutboundMessage(channel=state.channel.value, kind="CARD", text=speech, blocks=blocks)
@@ -607,7 +707,10 @@ class TravelOrchestratorService:
         plan = PlanOption(**plan_row.plan_json)
 
         passenger_id = gate if gate != "ASK" else "0"
-        target_ids = set(state.currentPassengerIds or ([passenger_id] if passenger_id else ["0"]))
+        resolved_slot_ids = []
+        if state.slots and state.slots.passengers:
+            resolved_slot_ids = resolve_passenger_ids_from_slots(state.slots.passengers, profile)
+        target_ids = set(state.currentPassengerIds or resolved_slot_ids or ([passenger_id] if passenger_id else ["0"]))
         profile_passengers = profile.passengers or []
         passengers = [
             p for p in profile_passengers
@@ -662,6 +765,10 @@ class TravelOrchestratorService:
             "currentIntent": Intent.PLAN_BOOK,
             "orderId": order.id,
             "orderNo": order.order_no,
+            "passengerSelectionPending": False,
+            "passengerSelectionDone": True,
+            "currentPassengerId": passenger_id,
+            "currentPassengerIds": list(target_ids),
         })
         await self._save_state(db, new_state)
 
@@ -672,8 +779,8 @@ class TravelOrchestratorService:
         msg = OutboundMessage(
             channel=state.channel.value,
             kind="TASK_PROGRESS",
-            text=f"已开始下单（任务 {task_id}），请稍候…支付完成后回复『付好了』。",
-            task_progress={"taskId": task_id, "status": "RUNNING", "progress": 10},
+            text=f"已为您锁定席位并生成订单 {order.order_no}，请在下方订单卡片中完成支付。支付完成后点击『我已完成支付』或回复『付好了』即可出票。",
+            task_progress={"taskId": task_id, "status": "RUNNING", "progress": 10, "orderNo": order.order_no},
             correlation_id=task_id,
         )
         ctx.record_event("RESPONSE_READY", "BOOKING", new_state.model_dump(), msg.model_dump())
@@ -714,7 +821,19 @@ class TravelOrchestratorService:
             db, user_id, TaskType.price_watch.value,
             {"order_no": order.order_no, "phase": 2}, channel=state.channel.value, order_id=order.id,
         )
-        new_state = state.model_copy(update={"phase": SessionPhase.ORDER, "currentIntent": Intent.ORDER_QUERY})
+        new_state = state.model_copy(update={
+            "phase": SessionPhase.ORDER,
+            "currentIntent": Intent.ORDER_QUERY,
+            "slots": TravelSlotBundle(),
+            "lastRecommendations": [],
+            "currentBatch": [],
+            "selectedPlanId": None,
+            "pendingConfirms": [],
+            "passengerSelectionPending": False,
+            "passengerSelectionDone": False,
+            "currentPassengerId": None,
+            "currentPassengerIds": [],
+        })
         await self._save_state(db, new_state)
         if ctx:
             ctx.record_event("PAYMENT_CONFIRMED", "PAYMENT", {"orderNo": order.order_no}, {"status": order.status})
@@ -730,6 +849,7 @@ class TravelOrchestratorService:
 
         from app.config import settings as _settings
 
+        paid_event = mock_supplier.get_paid_event(order.order_no)
         start = _time.time()
         deadline = start + _settings.TRAVEL_PAYMENT_MONITOR_TIMEOUT
         while _time.time() < deadline:
@@ -756,14 +876,13 @@ class TravelOrchestratorService:
                         return
             except Exception as e:  # noqa: BLE001
                 log.warning("支付监控异常 order=%s: %s", order.order_no, e)
-            # 自适应轮询：前 2 分钟每 30 秒，之后每 90 秒（1~2 分钟），总超时 15 分钟
+            # 自适应等待：事件实时唤醒或短周期轮询（前 2 分钟每 2 秒，之后每 10 秒）
             elapsed = _time.time() - start
-            interval = (
-                _settings.TRAVEL_PAYMENT_POLL_SECONDS_FAST
-                if elapsed < 120
-                else _settings.TRAVEL_PAYMENT_POLL_SECONDS_SLOW
-            )
-            await asyncio.sleep(interval)
+            poll_timeout = 2.0 if elapsed < 120 else 10.0
+            try:
+                await asyncio.wait_for(paid_event.wait(), timeout=poll_timeout)
+            except asyncio.TimeoutError:
+                pass
         await browser_order.close(order.order_no)
         log.info("三层支付检测超时，保持 WAITING_USER（用户仍可回复“付好了”确认）: order=%s", order.order_no)
 
@@ -792,10 +911,11 @@ class TravelOrchestratorService:
                 "tripDate": date_label,
                 "legs": legs,
             })
+        is_web = getattr(state.channel, "value", str(state.channel)) == "web"
         msg = OutboundMessage(
             channel=state.channel.value,
             kind="CARD",
-            text="\n".join(lines),
+            text=f"已为您查询到 {len(orders)} 笔历史订单。" if is_web else "\n".join(lines),
             blocks=blocks,
         )
         ctx.record_event("ORDER_QUERIED", "ORDER", {"userId": user_id}, {"count": len(orders)})
@@ -1205,6 +1325,7 @@ class TravelOrchestratorService:
             travelStyle=choose(history.travelStyle, current.travelStyle),
             transportMode=choose(history.transportMode, current.transportMode),
             companion=choose(history.companion, current.companion),
+            passengers=choose(history.passengers, current.passengers),
         )
 
     async def _latest_active_order(self, db: AsyncSession, user_id: int) -> Optional[TravelOrderRow]:
@@ -1441,6 +1562,20 @@ class TravelOrchestratorService:
         for kw, val in companion_map.items():
             if kw in text and val not in slots.companion:
                 slots.companion.append(val)
+
+        # 乘车人员抽取（支持如“我选择：张三(本人)”或“本人/我一个人”等兜底模式）
+        choice_match = _re.search(r"我选择[：:]\s*([^\n，,]+)", text)
+        if choice_match:
+            raw_c = choice_match.group(1).strip()
+            for item in _re.split(r"[,，、\s]+", raw_c):
+                name_clean = _re.sub(r"\(.*?\)|（.*?）", "", item).strip()
+                if name_clean and name_clean not in slots.passengers:
+                    slots.passengers.append(name_clean)
+        else:
+            passenger_map = {"本人": "本人", "只有我": "本人", "我一个人": "本人", "就我": "本人"}
+            for kw, val in passenger_map.items():
+                if kw in text and val not in slots.passengers:
+                    slots.passengers.append(val)
 
         date_pattern = (
             r"(今天|明天|后天|大后天|下下周[一二三四五六日天]?|下周[一二三四五六日天]?|"

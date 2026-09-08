@@ -10,6 +10,7 @@ from app.services.orchestrator import (
     passenger_selection_question,
     resolve_passenger_choice,
     resolve_passenger_choices,
+    resolve_passenger_ids_from_slots,
 )
 
 
@@ -114,4 +115,92 @@ def test_clarify_rule_requires_passengers():
         destination=["上海"], tripDate=["2026-10-01"], budget=["经济型"], passengers=["本人出行 (1人)"]
     )
     assert "passengers" not in svc.missing_slots(slots_with_p)
+
+
+def test_gate_bypasses_ask_if_slots_contain_passenger():
+    profile = _profile([
+        {"name": "张三", "id_no": "S1", "role": "self", "passenger_id": "0"},
+        {"name": "李雷", "id_no": "M1", "role": "others", "passenger_id": "P_M1"},
+    ])
+    # 规划阶段槽位已有本人名字或本人
+    state_self_name = _state()
+    state_self_name.slots.passengers = ["张三"]
+    assert passenger_selection_gate(profile, state_self_name) == "0"
+
+    state_self_keyword = _state()
+    state_self_keyword.slots.passengers = ["本人出行 (1人)"]
+    assert passenger_selection_gate(profile, state_self_keyword) == "0"
+
+    # 规划阶段槽位指定了同行人李雷
+    state_other = _state()
+    state_other.slots.passengers = ["李雷"]
+    assert passenger_selection_gate(profile, state_other) == "P_M1"
+
+
+def test_resolve_passenger_by_self_name_and_slots():
+    profile = _profile([
+        {"name": "张三", "id_no": "S1", "role": "self", "passenger_id": "0"},
+        {"name": "李雷", "id_no": "M1", "role": "others", "passenger_id": "P_M1"},
+    ])
+    # 精确或包含姓名匹配本人
+    assert resolve_passenger_choice("张三", profile) == "0"
+    assert resolve_passenger_choice("张三(本人)", profile) == "0"
+    assert resolve_passenger_choices("张三", profile) == ["0"]
+
+    # 从槽位列表多选解析
+    assert resolve_passenger_ids_from_slots(["张三", "李雷"], profile) == ["0", "P_M1"]
+    assert resolve_passenger_ids_from_slots(["我选择：张三(本人)"], profile) == ["0"]
+
+
+from unittest.mock import AsyncMock, MagicMock, patch
+import pytest
+from app.services.booking import BookingService
+from app.models.schemas import PlanOption, TransportLeg
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_create_order_draft_defines_order_no_and_pricing():
+    qr = MagicMock()
+    push = MagicMock()
+    task = MagicMock()
+    service = BookingService(qr_capture=qr, push_service=push, task_service=task)
+
+    db = AsyncMock()
+    plan = PlanOption(
+        plan_id="p1",
+        legs=[
+            TransportLeg(
+                mode="TRAIN",
+                from_city="北京",
+                to_city="上海",
+                depart="08:00",
+                arrive="12:00",
+                price=553.0,
+            )
+        ],
+        total_price=553.0,
+        total_duration_h=4.0,
+    )
+    passengers = [
+        {"name": "张三", "passenger_id": "0"},
+        {"name": "李雷", "passenger_id": "P_M1"},
+    ]
+
+    with patch("app.crud.profile.get_profile", new_callable=AsyncMock) as mock_prof, \
+         patch("app.crud.order.get_order_by_idempotency", new_callable=AsyncMock) as mock_idem:
+        mock_prof.return_value = None
+        mock_idem.return_value = None
+        order = await service.create_order_draft(db, user_id=1, plan=plan, passengers=passengers)
+        assert order.order_no is not None
+        assert order.order_no.startswith("ORD")
+        assert order.price == 553.0 * 2
+        assert order.tax_fee == 50.0 * 2
+        assert len(order.passengers.get("list", [])) == 2
+
+
 

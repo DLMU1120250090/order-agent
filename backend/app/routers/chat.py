@@ -15,6 +15,16 @@ def _to_chat_response(msg: OutboundMessage, session_id: str) -> TravelChatRespon
     trace_id = None
     if msg.correlation_id and (msg.correlation_id.startswith("trace_") or not msg.correlation_id.startswith("ORD")):
         trace_id = msg.correlation_id
+    order_no = None
+    if msg.correlation_id and msg.correlation_id.startswith("ORD"):
+        order_no = msg.correlation_id
+    elif msg.task_progress and msg.task_progress.get("orderNo"):
+        order_no = msg.task_progress.get("orderNo")
+    elif msg.blocks:
+        for b in msg.blocks:
+            if isinstance(b, dict) and b.get("orderNo"):
+                order_no = b.get("orderNo")
+                break
     return TravelChatResponse(
         sessionId=msg.session_id or session_id,
         traceId=trace_id,
@@ -26,7 +36,7 @@ def _to_chat_response(msg: OutboundMessage, session_id: str) -> TravelChatRespon
         missingSlots=msg.missing_slots,
         confirmFields=msg.confirm_fields,
         taskId=msg.task_progress.get("taskId") if msg.task_progress else None,
-        orderNo=msg.correlation_id if msg.correlation_id and msg.correlation_id.startswith("ORD") else None,
+        orderNo=order_no,
     )
 
 

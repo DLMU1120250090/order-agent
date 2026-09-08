@@ -74,6 +74,7 @@ class BookingService:
         passenger_count = max(1, len(passengers))
         total_price = round(sum(leg.price for leg in plan.legs) * passenger_count, 2)
         tax_fee = round(50.0 * passenger_count, 2)
+        order_no = f"ORD{datetime.now().strftime('%Y%m%d%H%M%S')}{user_id % 100:02d}"
 
         row = TravelOrderRow(
             user_id=user_id,
@@ -128,17 +129,18 @@ class BookingService:
             result={"status": "WAITING_PAYMENT", "order_no": order.order_no, "qr_image_path": qr_path},
         )
 
-        # 二维码生成即推（有时效）
-        await self.push_service.push(
-            order.user_id,
-            OutboundMessage(
-                kind="IMAGE",
-                channel=order.channel,
-                text=f"订单 {order.order_no} 待支付，请本人扫码完成支付（Agent 绝不代付）。支付后回复『付好了』。",
-                image_path=qr_path,
-                correlation_id=task_id,
-            ),
-        )
+        # 二维码生成即推（有时效；非 Web 渠道推送图片消息，Web 渠道由 ActionCard 交互卡片承载展示）
+        if order.channel != "web":
+            await self.push_service.push(
+                order.user_id,
+                OutboundMessage(
+                    kind="IMAGE",
+                    channel=order.channel,
+                    text=f"订单 {order.order_no} 待支付，请本人扫码完成支付（Agent 绝不代付）。支付后回复『付好了』。",
+                    image_path=qr_path,
+                    correlation_id=task_id,
+                ),
+            )
         await self.task_service.wait_user(db, task_id, PaymentPending.PAYMENT.value, "等待本人扫码支付…")
         return {
             "status": "WAITING_PAYMENT",
@@ -193,9 +195,11 @@ class BookingService:
             await self.push_service.push(
                 order.user_id,
                 OutboundMessage(
-                    kind="TEXT",
+                    kind="CARD",
                     channel=order.channel,
                     text=f"✅ 订单 {order.order_no} 已支付出票（Mock 供应商·页面/轮询检测）。可回复“查订单”查看。",
+                    blocks=[{"orderNo": order.order_no, "status": "PAID", "price": order.price}],
+                    task_progress={"taskId": task_id, "status": "PAID", "progress": 100, "orderNo": order.order_no},
                     correlation_id=task_id,
                 ),
             )

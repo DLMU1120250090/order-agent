@@ -67,12 +67,12 @@ class SchedulerService:
     def start(self):
         if self.scheduler.running:
             return
-        self.scheduler.add_job(self._price_watch, IntervalTrigger(minutes=60), id="price_watch", max_instances=1, coalesce=True)
-        self.scheduler.add_job(self._flight_monitor, IntervalTrigger(minutes=360), id="flight_monitor", max_instances=1, coalesce=True)
-        self.scheduler.add_job(self._departure_reminder, IntervalTrigger(minutes=30), id="departure_reminder", max_instances=1, coalesce=True)
-        self.scheduler.add_job(self._memory_distill, CronTrigger(hour=23, minute=55), id="memory_distill", max_instances=1, coalesce=True)
-        self.scheduler.add_job(self._retry_worker, IntervalTrigger(minutes=1), id="retry_worker", max_instances=1, coalesce=True)
-        self.scheduler.add_job(self._cleanup_data_cache, IntervalTrigger(minutes=60), id="data_cache_cleanup", max_instances=1, coalesce=True)
+        self.scheduler.add_job(self._price_watch, IntervalTrigger(minutes=60), id="price_watch", max_instances=1, coalesce=True, replace_existing=True)
+        self.scheduler.add_job(self._flight_monitor, IntervalTrigger(minutes=360), id="flight_monitor", max_instances=1, coalesce=True, replace_existing=True)
+        self.scheduler.add_job(self._departure_reminder, IntervalTrigger(minutes=30), id="departure_reminder", max_instances=1, coalesce=True, replace_existing=True)
+        self.scheduler.add_job(self._memory_distill, CronTrigger(hour=23, minute=55), id="memory_distill", max_instances=1, coalesce=True, replace_existing=True)
+        self.scheduler.add_job(self._retry_worker, IntervalTrigger(minutes=1), id="retry_worker", max_instances=1, coalesce=True, replace_existing=True)
+        self.scheduler.add_job(self._cleanup_data_cache, IntervalTrigger(minutes=60), id="data_cache_cleanup", max_instances=1, coalesce=True, replace_existing=True)
         self.scheduler.start()
         log.info("SchedulerService 已启动：price_watch/flight_monitor/departure_reminder/memory_distill/retry_worker/data_cache_cleanup")
 

@@ -119,7 +119,7 @@ class BrowserOrderService:
             log.info("Playwright 会话已关闭: order_no=%s", order_no)
 
     def _place_auto(self, order: TravelOrderRow, trip_date: str = "") -> str:
-        if settings.TRAVEL_CTRIP_REAL_ENABLED:
+        if settings.TRAVEL_CTRIP_REAL_ENABLED and not settings.TRAVEL_MOCK_MODE:
             try:
                 return self._place_ctrip_sync(order, trip_date)
             except Exception as e:  # noqa: BLE001
