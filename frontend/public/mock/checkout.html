@@ -136,6 +136,28 @@
                     method: "POST",
                     headers: { "Content-Type": "application/json" }
                 }).catch(function () {});
+
+                // 跨窗口通知父页面即时刷新状态
+                if (window.opener) {
+                    try {
+                        window.opener.postMessage({ type: "PAYMENT_SUCCESS", orderNo: orderNo }, "*");
+                    } catch (e) {}
+                }
+
+                // 3 秒倒计时自动关闭收银台窗口
+                let countdown = 3;
+                const tipEl = document.getElementById("auto-pay-tip");
+                if (tipEl) tipEl.textContent = "✅ 支付成功！窗口将在 " + countdown + " 秒后自动关闭…";
+                const timer = setInterval(function () {
+                    countdown--;
+                    if (countdown > 0) {
+                        if (tipEl) tipEl.textContent = "✅ 支付成功！窗口将在 " + countdown + " 秒后自动关闭…";
+                    } else {
+                        clearInterval(timer);
+                        if (tipEl) tipEl.textContent = "✅ 支付成功！正在关闭窗口…";
+                        window.close();
+                    }
+                }, 1000);
             }
         })();
     </script>
