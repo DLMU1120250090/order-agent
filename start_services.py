@@ -126,7 +126,8 @@ def main() -> int:
     # ---- start ----
     print("[..] starting backend on 127.0.0.1:8000 ...")
     spawn([PYTHON, "-m", "uvicorn", "app.main:app",
-           "--host", "127.0.0.1", "--port", "8000"], BACKEND_DIR, foreground)
+           "--host", "127.0.0.1", "--port", "8000",
+           "--reload", "--reload-dir", "app"], BACKEND_DIR, foreground)
     print("[..] starting nginx ...")
     spawn([str(NGINX_EXE), "-p", ".", "-c", "conf/nginx.conf"], NGINX_DIR, foreground)
 
