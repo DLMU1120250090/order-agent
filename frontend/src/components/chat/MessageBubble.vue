@@ -64,6 +64,12 @@
         :blocks="message.displayBlocks"
         :text="message.text"
       />
+
+      <!-- 5. Change Decision Comparison Card -->
+      <ChangeDecisionCard
+        v-if="hasChangeDecision"
+        :message="message"
+      />
     </div>
   </div>
 </template>
@@ -76,6 +82,7 @@ import ClarifyCard from './ClarifyCard.vue'
 import PlanCard from './PlanCard.vue'
 import ActionCard from './ActionCard.vue'
 import OrderListCard from './OrderListCard.vue'
+import ChangeDecisionCard from './ChangeDecisionCard.vue'
 
 const props = defineProps<{
   message: ChatMessage
@@ -108,7 +115,7 @@ const formattedText = computed(() => {
 
 const hasPlans = computed(() => {
   return props.message.displayBlocks?.some(
-    (b) => b && !b.orderNo && (b.planId || b.totalPrice !== undefined || b.score !== undefined)
+    (b) => b && !b.orderNo && (b.planId || (Array.isArray(b.legs) && b.legs.length > 0))
   )
 })
 
@@ -116,7 +123,22 @@ const hasOrders = computed(() => {
   return props.message.displayBlocks?.some((b) => b && b.orderNo && b.status)
 })
 
+const hasChangeDecision = computed(() => {
+  const blocks = props.message.displayBlocks || []
+  if (blocks.some((b: any) => b && (b.blockType === 'CHANGE_DECISION' || ['KEEP', 'CANCEL', 'CHANGE', 'CANCEL_REBOOK'].includes(b.kind)))) {
+    return true
+  }
+  const t = props.message.text || ''
+  return t.includes('改签方案对比') || (t.includes('方案A') && t.includes('方案C') && (t.includes('改签') || t.includes('损失')))
+})
+
+const isRefundOrChange = computed(() => {
+  const t = props.message.text || ''
+  return t.includes('退票') || t.includes('退款') || t.includes('改签')
+})
+
 const hasAction = computed(() => {
+  if (isRefundOrChange.value || hasChangeDecision.value) return false
   return (
     !hasOrders.value &&
     (Boolean(props.message.orderNo) ||
@@ -126,8 +148,8 @@ const hasAction = computed(() => {
 })
 
 const showTextBubble = computed(() => {
-  // 当存在方案推荐卡片、订单列表卡片或订单履约卡片时，完全由各自交互卡片承载，隐藏上方重复的长文本气泡
-  if (hasPlans.value || hasOrders.value || hasAction.value) return false
+  // 当存在方案推荐卡片、订单列表卡片、订单履约卡片或改签决策卡片时，完全由各自交互卡片承载，隐藏上方重复的长文本气泡
+  if (hasPlans.value || hasOrders.value || hasAction.value || hasChangeDecision.value) return false
   if (!props.message.text) return false
   return true
 })

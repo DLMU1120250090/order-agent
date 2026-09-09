@@ -111,28 +111,22 @@
 
       <!-- User Feedback Section (30% Evaluation Weight Loop) -->
       <div class="feedback-section">
-        <div v-if="feedbackSaved" class="feedback-done">
+        <div v-if="feedbackSaved || isLocallySaved" class="feedback-done">
           <el-icon><CircleCheckFilled class="text-green-500" /></el-icon>
-          <span>反馈已记录 ({{ feedbackRating }} 星)</span>
+          <span class="feedback-label">已评价：</span>
+          <el-rate :model-value="feedbackRating || localSavedRating || 5" disabled size="small" />
+          <span class="rating-text">({{ feedbackRating || localSavedRating || 5 }} 星)</span>
         </div>
-        <div v-else class="feedback-buttons">
-          <span class="feedback-tip">方案是否满意：</span>
-          <button
-            type="button"
-            class="feedback-btn like"
-            title="满意，符合我的出行意图"
-            @click="handleFeedback(5, 'LIKE')"
-          >
-            👍 满意
-          </button>
-          <button
-            type="button"
-            class="feedback-btn dislike"
-            title="不满意，需优化"
-            @click="openDislikeDialog"
-          >
-            👎 不满意
-          </button>
+        <div v-else class="feedback-interactive">
+          <span class="feedback-tip">方案评分：</span>
+          <el-rate
+            v-model="interactiveRating"
+            :colors="['#ef4444', '#f59e0b', '#10b981']"
+            :texts="['1星(很差)', '2星(不满意)', '3星(一般)', '4星(满意)', '5星(极佳)']"
+            show-text
+            size="small"
+            @change="handleRateChange"
+          />
         </div>
       </div>
     </div>
@@ -153,7 +147,7 @@
         </el-radio-group>
       </div>
       <template #footer>
-        <el-button size="small" @click="dislikeDialogVisible = false">取消</el-button>
+        <el-button size="small" @click="cancelDislikeDialog">取消</el-button>
         <el-button type="primary" size="small" @click="confirmDislikeFeedback">
           提交反馈
         </el-button>
@@ -177,6 +171,9 @@ const props = defineProps<{
 const chatStore = useChatStore()
 const dislikeDialogVisible = ref(false)
 const selectedDislikeReason = ref('价格超出预期')
+const interactiveRating = ref(0)
+const isLocallySaved = ref(false)
+const localSavedRating = ref(0)
 
 const plans = computed(() => {
   if (!Array.isArray(props.blocks)) return []
@@ -196,6 +193,8 @@ function adjustCriteria() {
 }
 
 function handleFeedback(rating: number, action: string, reason = '') {
+  isLocallySaved.value = true
+  localSavedRating.value = rating
   chatStore.submitFeedback(props.messageId, {
     planId: plans.value[0]?.planId,
     traceId: props.traceId,
@@ -205,13 +204,26 @@ function handleFeedback(rating: number, action: string, reason = '') {
   })
 }
 
-function openDislikeDialog() {
-  dislikeDialogVisible.value = true
+function handleRateChange(val: number) {
+  if (val <= 2) {
+    dislikeDialogVisible.value = true
+  } else if (val === 3) {
+    handleFeedback(3, 'NEUTRAL')
+  } else {
+    handleFeedback(val, 'LIKE')
+  }
 }
 
 function confirmDislikeFeedback() {
   dislikeDialogVisible.value = false
-  handleFeedback(2, 'DISLIKE', selectedDislikeReason.value)
+  handleFeedback(interactiveRating.value || 2, 'DISLIKE', selectedDislikeReason.value)
+}
+
+function cancelDislikeDialog() {
+  dislikeDialogVisible.value = false
+  if (interactiveRating.value > 0) {
+    handleFeedback(interactiveRating.value, 'DISLIKE', '未选择具体原因')
+  }
 }
 </script>
 
@@ -484,45 +496,39 @@ function confirmDislikeFeedback() {
   align-items: center;
 }
 
-.feedback-buttons {
+.feedback-interactive {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .feedback-tip {
-  font-size: 11px;
-  color: #94a3b8;
-}
-
-.feedback-btn {
-  background: #f8fafc;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 3px 8px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.feedback-btn.like:hover {
-  background: #f0fdf4;
-  border-color: #22c55e;
-  color: #15803d;
-}
-
-.feedback-btn.dislike:hover {
-  background: #fef2f2;
-  border-color: #ef4444;
-  color: #b91c1c;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
 }
 
 .feedback-done {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   font-size: 12px;
   color: #16a34a;
+  background: #f0fdf4;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid #bbf7d0;
+}
+
+.feedback-label {
+  color: #15803d;
+  font-weight: 600;
+}
+
+.rating-text {
+  font-size: 11px;
+  color: #475569;
+  font-weight: 600;
 }
 
 .reason-group {

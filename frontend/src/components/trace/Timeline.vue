@@ -97,11 +97,13 @@
     <div v-else class="waterfall-stream">
       <div
         v-for="ev in filteredEvents"
+        :id="`timeline-step-${ev.stepOrder}`"
         :key="ev.stepOrder || ev.eventId"
         class="waterfall-node"
         :class="{
           'has-error': !!ev.errorMessage,
           'is-expanded': expandedSteps.has(ev.stepOrder),
+          'is-highlighted': traceStore.highlightedStepOrder === ev.stepOrder,
         }"
       >
         <!-- Node Left Pillar -->
@@ -189,9 +191,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useTraceStore } from '@/stores/trace'
 import type { TraceRowOut, TraceEvent } from '@/types/trace'
+import { formatBeijingDateTime } from '@/utils/time'
+
+const traceStore = useTraceStore()
 
 const props = defineProps<{
   trace: TraceRowOut
@@ -217,6 +223,23 @@ const PHASES = [
 
 const selectedPhase = ref('ALL')
 const expandedSteps = ref<Set<number>>(new Set([1, 2, 3]))
+
+// 监听高亮节点指令（来自 Replay 抽屉溯源点击）
+watch(
+  () => traceStore.highlightedStepOrder,
+  (step) => {
+    if (step !== null && step !== undefined) {
+      selectedPhase.value = 'ALL'
+      expandedSteps.value.add(step)
+      nextTick(() => {
+        const el = document.getElementById(`timeline-step-${step}`)
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+      })
+    }
+  }
+)
 
 const filteredEvents = computed(() => {
   if (selectedPhase.value === 'ALL') return props.events
@@ -272,9 +295,7 @@ function formatJson(data: any): string {
 }
 
 function formatDate(dateStr?: string): string {
-  if (!dateStr) return '-'
-  const d = new Date(dateStr)
-  return d.toLocaleString()
+  return formatBeijingDateTime(dateStr)
 }
 
 async function copy(text: string) {
@@ -550,6 +571,23 @@ async function copy(text: string) {
 
 .waterfall-node.is-expanded .node-card {
   border-color: #93c5fd;
+}
+
+.waterfall-node.is-highlighted .node-card {
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.28) !important;
+  animation: nodePulse 1.6s ease-in-out infinite alternate;
+}
+
+@keyframes nodePulse {
+  0% {
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+    border-color: #3b82f6;
+  }
+  100% {
+    box-shadow: 0 0 0 8px rgba(37, 99, 235, 0.45);
+    border-color: #1d4ed8;
+  }
 }
 
 .node-header {

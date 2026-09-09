@@ -22,6 +22,16 @@ export const useTraceStore = defineStore('trace', () => {
   const showReplayDrawer = ref(false)
   const showLabelModal = ref(false)
   const isLabeling = ref(false)
+  const highlightedStepOrder = ref<number | null>(null)
+
+  function highlightStep(stepOrder: number) {
+    highlightedStepOrder.value = stepOrder
+    setTimeout(() => {
+      if (highlightedStepOrder.value === stepOrder) {
+        highlightedStepOrder.value = null
+      }
+    }, 4000)
+  }
 
   // Events of current selected trace
   const currentEvents = computed<TraceEvent[]>(() => {
@@ -155,10 +165,10 @@ export const useTraceStore = defineStore('trace', () => {
     if (!tid) return
     isReplaying.value = true
     replayResult.value = null
+    showReplayDrawer.value = true
     try {
       const res = await traceApi.replayTrace(tid)
       replayResult.value = res
-      showReplayDrawer.value = true
       return res
     } catch (err) {
       console.error('[TraceStore] Replay failed:', err)
@@ -213,6 +223,8 @@ export const useTraceStore = defineStore('trace', () => {
     showReplayDrawer,
     showLabelModal,
     isLabeling,
+    highlightedStepOrder,
+    highlightStep,
     currentEvents,
     filteredTraces,
     summaryMetrics,

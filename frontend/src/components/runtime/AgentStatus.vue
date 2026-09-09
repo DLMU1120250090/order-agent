@@ -115,6 +115,8 @@ const overallStatusClass = computed(() => {
   if (!runtimeStore.traceDetail) return 'pending'
   const stages = runtimeStore.pipelineStages
   if (stages.some(s => s.status === 'FAILED')) return 'failed'
+  if (runtimeStore.isOrderRefunded) return 'success'
+  if (runtimeStore.isOrderChanged) return 'success'
   if (runtimeStore.isOrderPaid) return 'success'
   if (runtimeStore.isWaitingPayment) return 'waiting'
   if (stages.some(s => s.status === 'RUNNING')) return 'running'
@@ -130,6 +132,8 @@ const overallStatusText = computed(() => {
   if (!runtimeStore.traceDetail) return '就绪待命'
   const stages = runtimeStore.pipelineStages
   if (stages.some(s => s.status === 'FAILED')) return '执行异常'
+  if (runtimeStore.isOrderRefunded) return '退款完成'
+  if (runtimeStore.isOrderChanged) return '改签完成'
   if (runtimeStore.isOrderPaid) return '出票完成'
   if (runtimeStore.isWaitingPayment) return '等待支付'
   if (stages.some(s => s.status === 'RUNNING')) return '规划流转中'

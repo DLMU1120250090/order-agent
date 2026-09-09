@@ -69,6 +69,7 @@
           type="primary"
           plain
           :disabled="!traceStore.selectedTraceId"
+          :loading="traceStore.isReplaying"
           @click="handleOpenReplay"
         >
           <el-icon><VideoPlay /></el-icon>
@@ -91,8 +92,45 @@
     <main class="trace-main-area">
       <!-- Left Sidebar: Trace Records List -->
       <aside class="trace-sidebar">
+        <!-- Sidebar Header: Total & Expand Controls -->
         <div class="sidebar-header">
-          <span class="count-txt">共 {{ traceStore.filteredTraces.length }} 条记录</span>
+          <div class="header-left">
+            <span class="count-txt">共 {{ traceStore.filteredTraces.length }} 条记录</span>
+            <span v-if="groupMode !== 'flat'" class="group-count-txt">· {{ groupCount }} 组</span>
+          </div>
+          <div v-if="groupMode !== 'flat'" class="header-actions">
+            <button type="button" class="mini-action-btn" @click="toggleExpandAll">
+              {{ allExpanded ? '全部折叠' : '全部展开' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 聚合模式切换栏 (方案三) -->
+        <div class="group-mode-bar">
+          <button
+            type="button"
+            class="group-mode-btn"
+            :class="{ active: groupMode === 'flat' }"
+            @click="groupMode = 'flat'"
+          >
+            平铺明细
+          </button>
+          <button
+            type="button"
+            class="group-mode-btn"
+            :class="{ active: groupMode === 'session' }"
+            @click="groupMode = 'session'"
+          >
+            按会话聚合
+          </button>
+          <button
+            type="button"
+            class="group-mode-btn"
+            :class="{ active: groupMode === 'order' }"
+            @click="groupMode = 'order'"
+          >
+            按订单聚合
+          </button>
         </div>
 
         <div v-loading="traceStore.isLoadingList" class="trace-list-container">
@@ -100,35 +138,158 @@
             <el-empty description="未找到符合条件的 Trace 记录" :image-size="60" />
           </div>
 
-          <div
-            v-for="item in traceStore.filteredTraces"
-            :key="item.traceId"
-            class="trace-item-card"
-            :class="{ active: item.traceId === traceStore.selectedTraceId }"
-            @click="traceStore.selectTrace(item.traceId)"
-          >
-            <div class="card-top-row">
-              <span class="item-trace-id">{{ item.traceId }}</span>
-              <span class="item-status" :class="item.status.toLowerCase()">
-                {{ item.status }}
-              </span>
-            </div>
-
-            <div class="card-mid-row">
-              <span class="item-session">Session: {{ item.sessionId }}</span>
-            </div>
-
-            <div class="card-bot-row">
-              <span class="item-time">{{ formatTime(item.createdAt) }}</span>
-              <div class="item-stats">
-                <span class="stat-tag">{{ item.eventCount }} 节点</span>
-                <span v-if="item.durationMs" class="stat-tag">{{ item.durationMs }}ms</span>
-                <span v-if="item.expectedIntent || item.expectedClarifyAction" class="star-tag" title="已标定金标准">
-                  ⭐
+          <!-- 模式一：平铺明细 (Flat) -->
+          <template v-else-if="groupMode === 'flat'">
+            <div
+              v-for="item in traceStore.filteredTraces"
+              :key="item.traceId"
+              class="trace-item-card"
+              :class="{ active: item.traceId === traceStore.selectedTraceId }"
+              @click="traceStore.selectTrace(item.traceId)"
+            >
+              <div class="card-top-row">
+                <div class="id-user-group">
+                  <span class="item-trace-id" :title="item.traceId">{{ item.traceId }}</span>
+                  <span class="uid-badge">UID: {{ item.userId }}</span>
+                </div>
+                <span class="item-status" :class="item.status.toLowerCase()">
+                  {{ item.status }}
                 </span>
               </div>
+
+              <div class="card-mid-row">
+                <span class="item-session" :title="item.sessionId">Session: {{ item.sessionId }}</span>
+                <span v-if="getPrimaryOrder(item)" class="item-order-tag" :title="getPrimaryOrder(item)">
+                  🎫 {{ getPrimaryOrder(item) }}
+                </span>
+              </div>
+
+              <div class="card-bot-row">
+                <span class="item-time">📅 {{ formatDateTime(item.createdAt) }}</span>
+                <div class="item-stats">
+                  <span class="stat-tag">{{ item.eventCount }} 节点</span>
+                  <span v-if="item.durationMs" class="stat-tag">{{ item.durationMs }}ms</span>
+                  <span v-if="item.expectedIntent || item.expectedClarifyAction" class="star-tag" title="已标定金标准">
+                    ⭐
+                  </span>
+                </div>
+              </div>
             </div>
-          </div>
+          </template>
+
+          <!-- 模式二：按会话聚合 (Session) -->
+          <template v-else-if="groupMode === 'session'">
+            <div
+              v-for="grp in sessionGroups"
+              :key="grp.sessionId"
+              class="trace-group-box"
+            >
+              <div
+                class="group-header"
+                @click="toggleGroup('sess_' + grp.sessionId)"
+              >
+                <div class="group-title-row">
+                  <el-icon class="arrow-icon" :class="{ rotated: isGroupExpanded('sess_' + grp.sessionId) }">
+                    <ArrowRight />
+                  </el-icon>
+                  <span class="group-icon">💬</span>
+                  <span class="group-title-text" :title="grp.sessionId">会话: {{ formatShortId(grp.sessionId, 12) }}</span>
+                  <span class="uid-badge">UID: {{ grp.userId }}</span>
+                </div>
+                <div class="group-meta-row">
+                  <span class="group-count-badge">{{ grp.traces.length }} 轮 Trace</span>
+                  <span class="group-time-text">{{ formatTime(grp.latestTime) }}</span>
+                </div>
+              </div>
+
+              <div v-show="isGroupExpanded('sess_' + grp.sessionId)" class="group-children">
+                <div
+                  v-for="(item, idx) in grp.traces"
+                  :key="item.traceId"
+                  class="group-item-card"
+                  :class="{ active: item.traceId === traceStore.selectedTraceId }"
+                  @click.stop="traceStore.selectTrace(item.traceId)"
+                >
+                  <div class="group-item-top">
+                    <div class="item-turn-pill">#{{ idx + 1 }}</div>
+                    <span class="item-trace-id mini" :title="item.traceId">{{ item.traceId }}</span>
+                    <span class="item-status mini" :class="item.status.toLowerCase()">
+                      {{ item.status }}
+                    </span>
+                  </div>
+                  <div class="group-item-bot">
+                    <span class="item-time">📅 {{ formatDateTime(item.createdAt) }}</span>
+                    <div class="item-stats">
+                      <span v-if="getPrimaryOrder(item)" class="item-order-tag mini" :title="getPrimaryOrder(item)">
+                        🎫 {{ getPrimaryOrder(item).slice(-8) }}
+                      </span>
+                      <span class="stat-tag">{{ item.eventCount }} 节点</span>
+                      <span v-if="item.durationMs" class="stat-tag">{{ item.durationMs }}ms</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- 模式三：按订单聚合 (Order) -->
+          <template v-else-if="groupMode === 'order'">
+            <div
+              v-for="grp in orderGroups"
+              :key="grp.key"
+              class="trace-group-box"
+            >
+              <div
+                class="group-header"
+                @click="toggleGroup('ord_' + grp.key)"
+              >
+                <div class="group-title-row">
+                  <el-icon class="arrow-icon" :class="{ rotated: isGroupExpanded('ord_' + grp.key) }">
+                    <ArrowRight />
+                  </el-icon>
+                  <span class="group-icon">{{ grp.isUnbound ? '💭' : '🎫' }}</span>
+                  <span class="group-title-text" :title="grp.orderNo">
+                    {{ grp.isUnbound ? '咨询与规划 (未成单)' : '订单: ' + grp.orderNo }}
+                  </span>
+                  <span v-if="!grp.isUnbound" class="uid-badge">UID: {{ grp.userId }}</span>
+                </div>
+                <div class="group-meta-row">
+                  <span class="group-count-badge">{{ grp.traces.length }} 条 Trace</span>
+                  <span class="group-time-text">{{ formatTime(grp.latestTime) }}</span>
+                </div>
+              </div>
+
+              <div v-show="isGroupExpanded('ord_' + grp.key)" class="group-children">
+                <div
+                  v-for="item in grp.traces"
+                  :key="item.traceId"
+                  class="group-item-card"
+                  :class="{ active: item.traceId === traceStore.selectedTraceId }"
+                  @click.stop="traceStore.selectTrace(item.traceId)"
+                >
+                  <div class="group-item-top">
+                    <div class="id-user-group">
+                      <span class="item-trace-id mini" :title="item.traceId">{{ item.traceId }}</span>
+                      <span class="uid-badge">UID: {{ item.userId }}</span>
+                    </div>
+                    <span class="item-status mini" :class="item.status.toLowerCase()">
+                      {{ item.status }}
+                    </span>
+                  </div>
+                  <div v-if="grp.isUnbound" class="group-item-mid">
+                    <span class="item-session mini" :title="item.sessionId">Session: {{ item.sessionId }}</span>
+                  </div>
+                  <div class="group-item-bot">
+                    <span class="item-time">📅 {{ formatDateTime(item.createdAt) }}</span>
+                    <div class="item-stats">
+                      <span class="stat-tag">{{ item.eventCount }} 节点</span>
+                      <span v-if="item.durationMs" class="stat-tag">{{ item.durationMs }}ms</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
         </div>
       </aside>
 
@@ -153,9 +314,13 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { useTraceStore } from '@/stores/trace'
+import { formatBeijingDateTime, formatBeijingTime } from '@/utils/time'
+import { extractOrderNos, getPrimaryOrderNo, formatShortId } from '@/utils/trace'
+import type { TraceRowOut } from '@/types/trace'
 import Timeline from '@/components/trace/Timeline.vue'
 import ReplayDrawer from '@/components/trace/ReplayDrawer.vue'
 import TraceLabelModal from '@/components/trace/TraceLabelModal.vue'
@@ -169,6 +334,139 @@ const RANGES: { key: '1h' | 'today' | '7d' | '30d'; label: string }[] = [
   { key: '7d', label: '最近 7 天' },
   { key: '30d', label: '最近 30 天' },
 ]
+
+// 聚合维度模式
+type GroupMode = 'flat' | 'session' | 'order'
+const groupMode = ref<GroupMode>('flat')
+const expandedGroupKeys = ref<Set<string>>(new Set())
+
+interface SessionGroup {
+  sessionId: string
+  userId: number
+  traces: TraceRowOut[]
+  latestTime: string
+}
+
+interface OrderGroup {
+  key: string
+  orderNo: string
+  isUnbound: boolean
+  userId: number
+  traces: TraceRowOut[]
+  latestTime: string
+}
+
+// 按会话聚合
+const sessionGroups = computed<SessionGroup[]>(() => {
+  const map = new Map<string, SessionGroup>()
+  for (const t of traceStore.filteredTraces) {
+    const sid = t.sessionId || 'UNKNOWN_SESSION'
+    if (!map.has(sid)) {
+      map.set(sid, {
+        sessionId: sid,
+        userId: t.userId,
+        traces: [],
+        latestTime: t.createdAt,
+      })
+    }
+    map.get(sid)!.traces.push(t)
+  }
+  return Array.from(map.values())
+})
+
+// 按订单聚合
+const orderGroups = computed<OrderGroup[]>(() => {
+  const map = new Map<string, OrderGroup>()
+  const unboundTraces: TraceRowOut[] = []
+  let unboundLatest = ''
+
+  for (const t of traceStore.filteredTraces) {
+    const orders = extractOrderNos(t)
+    if (orders.length === 0) {
+      unboundTraces.push(t)
+      if (!unboundLatest) unboundLatest = t.createdAt
+    } else {
+      for (const ono of orders) {
+        if (!map.has(ono)) {
+          map.set(ono, {
+            key: ono,
+            orderNo: ono,
+            isUnbound: false,
+            userId: t.userId,
+            traces: [],
+            latestTime: t.createdAt,
+          })
+        }
+        map.get(ono)!.traces.push(t)
+      }
+    }
+  }
+
+  const res = Array.from(map.values())
+  res.sort((a, b) => new Date(b.latestTime).getTime() - new Date(a.latestTime).getTime())
+
+  if (unboundTraces.length > 0) {
+    res.push({
+      key: 'UNBOUND',
+      orderNo: '未成单咨询与规划',
+      isUnbound: true,
+      userId: unboundTraces[0]?.userId || 0,
+      traces: unboundTraces,
+      latestTime: unboundLatest || unboundTraces[0]?.createdAt || '',
+    })
+  }
+  return res
+})
+
+const groupCount = computed(() => {
+  return groupMode.value === 'session' ? sessionGroups.value.length : orderGroups.value.length
+})
+
+function isGroupExpanded(key: string): boolean {
+  return expandedGroupKeys.value.has(key)
+}
+
+function toggleGroup(key: string) {
+  if (expandedGroupKeys.value.has(key)) {
+    expandedGroupKeys.value.delete(key)
+  } else {
+    expandedGroupKeys.value.add(key)
+  }
+}
+
+const allExpanded = computed(() => {
+  const keys = groupMode.value === 'session'
+    ? sessionGroups.value.map(g => 'sess_' + g.sessionId)
+    : orderGroups.value.map(g => 'ord_' + g.key)
+  return keys.length > 0 && keys.every(k => expandedGroupKeys.value.has(k))
+})
+
+function toggleExpandAll() {
+  const keys = groupMode.value === 'session'
+    ? sessionGroups.value.map(g => 'sess_' + g.sessionId)
+    : orderGroups.value.map(g => 'ord_' + g.key)
+  if (allExpanded.value) {
+    expandedGroupKeys.value.clear()
+  } else {
+    keys.forEach(k => expandedGroupKeys.value.add(k))
+  }
+}
+
+// 选中 Trace 时自动展开对应分组
+watch(
+  () => [traceStore.selectedTraceId, groupMode.value],
+  ([newTid]) => {
+    if (!newTid || typeof newTid !== 'string') return
+    if (groupMode.value === 'session') {
+      const grp = sessionGroups.value.find(g => g.traces.some(t => t.traceId === newTid))
+      if (grp) expandedGroupKeys.value.add('sess_' + grp.sessionId)
+    } else if (groupMode.value === 'order') {
+      const grp = orderGroups.value.find(g => g.traces.some(t => t.traceId === newTid))
+      if (grp) expandedGroupKeys.value.add('ord_' + grp.key)
+    }
+  },
+  { immediate: true }
+)
 
 onMounted(async () => {
   await traceStore.fetchTraces()
@@ -200,15 +498,25 @@ function handleRangeChange(rangeKey: '1h' | 'today' | '7d' | '30d') {
   traceStore.fetchTraces()
 }
 
-function handleOpenReplay() {
+async function handleOpenReplay() {
   if (!traceStore.selectedTraceId) return
-  traceStore.runReplay(traceStore.selectedTraceId)
+  try {
+    await traceStore.runReplay(traceStore.selectedTraceId)
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.message || err?.message || 'Replay 执行失败')
+  }
+}
+
+function formatDateTime(dateStr?: string): string {
+  return formatBeijingDateTime(dateStr)
 }
 
 function formatTime(dateStr?: string): string {
-  if (!dateStr) return '-'
-  const d = new Date(dateStr)
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return formatBeijingTime(dateStr)
+}
+
+function getPrimaryOrder(item: TraceRowOut): string {
+  return getPrimaryOrderNo(item) || ''
 }
 </script>
 
@@ -304,7 +612,7 @@ function formatTime(dateStr?: string): string {
 
 /* Sidebar List */
 .trace-sidebar {
-  width: 330px;
+  width: 360px;
   background: #ffffff;
   border-right: 1px solid #e2e8f0;
   display: flex;
@@ -314,15 +622,80 @@ function formatTime(dateStr?: string): string {
 }
 
 .sidebar-header {
-  height: 36px;
+  height: 38px;
   border-bottom: 1px solid #f1f5f9;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 14px;
+  background: #fafbfc;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.count-txt {
+  font-size: 11.5px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.group-count-txt {
   font-size: 11.5px;
   color: #94a3b8;
+}
+
+.mini-action-btn {
+  border: none;
+  background: transparent;
+  color: #3b82f6;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+
+.mini-action-btn:hover {
+  background: #eff6ff;
+}
+
+/* Group Mode Bar */
+.group-mode-bar {
+  display: flex;
+  align-items: center;
+  background: #f1f5f9;
+  border-radius: 6px;
+  margin: 8px 10px 4px 10px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.group-mode-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 11.5px;
   font-weight: 600;
-  background: #fafbfc;
+  padding: 4px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.group-mode-btn.active {
+  background: #ffffff;
+  color: #2563eb;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.group-mode-btn:hover:not(.active) {
+  color: #0f172a;
 }
 
 .trace-list-container {
@@ -338,16 +711,18 @@ function formatTime(dateStr?: string): string {
   padding: 40px 0;
 }
 
+/* Cards (Flat Mode) */
 .trace-item-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 9px 11px;
   cursor: pointer;
   transition: all 0.15s ease;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .trace-item-card:hover {
@@ -365,6 +740,14 @@ function formatTime(dateStr?: string): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
+}
+
+.id-user-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
 }
 
 .item-trace-id {
@@ -375,7 +758,19 @@ function formatTime(dateStr?: string): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 220px;
+  max-width: 200px;
+}
+
+.uid-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 0 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .item-status {
@@ -384,6 +779,7 @@ function formatTime(dateStr?: string): string {
   padding: 1px 6px;
   border-radius: 4px;
   text-transform: uppercase;
+  flex-shrink: 0;
 }
 
 .item-status.success {
@@ -399,9 +795,30 @@ function formatTime(dateStr?: string): string {
 .card-mid-row {
   font-size: 11px;
   color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.item-session {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+}
+
+.item-order-tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: #b45309;
+  background: #fef3c7;
+  border: 1px solid #fde68a;
+  padding: 0 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .card-bot-row {
@@ -412,8 +829,9 @@ function formatTime(dateStr?: string): string {
 }
 
 .item-time {
-  font-size: 11px;
-  color: #94a3b8;
+  font-size: 10.5px;
+  color: #64748b;
+  font-weight: 500;
 }
 
 .item-stats {
@@ -432,6 +850,170 @@ function formatTime(dateStr?: string): string {
 
 .star-tag {
   font-size: 12px;
+}
+
+/* Grouping Box (Session & Order Mode) */
+.trace-group-box {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 6px;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.trace-group-box:hover {
+  border-color: #cbd5e1;
+}
+
+.group-header {
+  padding: 8px 10px;
+  background: #f8fafc;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.group-header:hover {
+  background: #f1f5f9;
+}
+
+.group-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.arrow-icon {
+  font-size: 11px;
+  color: #94a3b8;
+  transition: transform 0.2s ease;
+}
+
+.arrow-icon.rotated {
+  transform: rotate(90deg);
+}
+
+.group-icon {
+  font-size: 12px;
+}
+
+.group-title-text {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.group-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 21px;
+}
+
+.group-count-badge {
+  font-size: 10px;
+  color: #475569;
+  background: #e2e8f0;
+  padding: 0 5px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.group-time-text {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.group-children {
+  padding: 6px 8px;
+  background: #fafbfc;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.group-item-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 7px 9px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.group-item-card:hover {
+  border-color: #93c5fd;
+  background: #f8fafc;
+}
+
+.group-item-card.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  box-shadow: 0 0 0 1px #3b82f6;
+}
+
+.group-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.item-turn-pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.item-trace-id.mini {
+  font-size: 11px;
+  max-width: 170px;
+}
+
+.item-status.mini {
+  font-size: 9px;
+  padding: 0 4px;
+}
+
+.group-item-mid {
+  font-size: 10px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-session.mini {
+  font-size: 10px;
+}
+
+.group-item-bot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-top: 1px;
+}
+
+.item-order-tag.mini {
+  font-size: 9.5px;
+  padding: 0 3px;
 }
 
 /* Content Pane */

@@ -37,13 +37,14 @@
       <div class="breakdown-list">
         <div class="formula-banner">
           <span class="formula-label">评分公式权重:</span>
-          <code>综合分 = 60% × 规则得分 + 30% × 用户反馈 + 10% × LLM 裁判</code>
+          <code v-if="breakdown.llmJudge !== null">综合分 = 60% × 规则得分 + 30% × 用户反馈 + 10% × LLM 裁判</code>
+          <code v-else>综合分 = 66.7% × 规则得分 + 33.3% × 用户反馈 (LLM 裁判未启用)</code>
         </div>
 
         <div class="breakdown-item">
           <div class="item-header">
             <span class="item-name">
-              <span class="weight-tag">60% 权重</span>
+              <span class="weight-tag">{{ breakdown.llmJudge !== null ? '60% 权重' : '66.7% 权重' }}</span>
               <strong>规则层客观得分 (Rule Score)</strong>
             </span>
             <span class="item-score">{{ breakdown.rule }} 分</span>
@@ -60,35 +61,40 @@
         <div class="breakdown-item">
           <div class="item-header">
             <span class="item-name">
-              <span class="weight-tag feed-tag">30% 权重</span>
-              <strong>用户真实验收反馈 (Feedback Score)</strong>
+              <span class="weight-tag feed-tag">{{ breakdown.llmJudge !== null ? '30% 权重' : '33.3% 权重' }}</span>
+              <strong>用户体验反馈分 (Feedback Score)</strong>
             </span>
-            <span class="item-score">{{ breakdown.feedback }} 分</span>
+            <span class="item-score">{{ breakdown.feedback !== null ? `${breakdown.feedback} 分` : '暂无数据' }}</span>
           </div>
           <el-progress
-            :percentage="breakdown.feedback"
+            :percentage="breakdown.feedback || 0"
             :stroke-width="8"
             color="#10b981"
             :show-text="false"
           />
-          <span class="item-hint">方案卡片 👍/👎 评分、重选换一批行为及出行后评价反馈</span>
+          <span class="item-hint">方案卡片 1-5 星评分（显式主观分）与下单采纳/换一批动作（隐式转化分）分层融合</span>
         </div>
 
-        <div class="breakdown-item">
+        <div class="breakdown-item" :class="{ 'is-disabled': breakdown.llmJudge === null }">
           <div class="item-header">
             <span class="item-name">
-              <span class="weight-tag llm-tag">10% 权重</span>
+              <span class="weight-tag" :class="breakdown.llmJudge !== null ? 'llm-tag' : 'disabled-tag'">
+                {{ breakdown.llmJudge !== null ? '10% 权重' : '未启用' }}
+              </span>
               <strong>LLM 裁判盲评打分 (LLM Judge)</strong>
             </span>
-            <span class="item-score">{{ breakdown.llmJudge }} 分</span>
+            <span v-if="breakdown.llmJudge !== null" class="item-score">{{ breakdown.llmJudge }} 分</span>
+            <span v-else class="item-score text-disabled">已关闭</span>
           </div>
           <el-progress
-            :percentage="breakdown.llmJudge"
+            :percentage="breakdown.llmJudge || 0"
             :stroke-width="8"
-            color="#8b5cf6"
+            :color="breakdown.llmJudge !== null ? '#8b5cf6' : '#cbd5e1'"
             :show-text="false"
           />
-          <span class="item-hint">基于评测 Prompt 从拟人性、方案合理性与礼貌度进行打分</span>
+          <span class="item-hint">
+            {{ breakdown.llmJudge !== null ? '基于评测 Prompt 从拟人性、方案合理性与礼貌度进行打分' : '裁判打分已关闭，权重已自动归一化分摊至客观规则与用户反馈' }}
+          </span>
         </div>
       </div>
     </div>
@@ -102,8 +108,8 @@ const props = defineProps<{
   overallScore: number
   breakdown: {
     rule: number
-    feedback: number
-    llmJudge: number
+    feedback: number | null
+    llmJudge: number | null
   }
 }>()
 
@@ -306,6 +312,20 @@ const scoreLevelText = computed(() => {
 .llm-tag {
   background: #f5f3ff;
   color: #7c3aed;
+}
+
+.disabled-tag {
+  background: #f1f5f9;
+  color: #94a3b8;
+}
+
+.text-disabled {
+  color: #94a3b8 !important;
+  font-weight: 500 !important;
+}
+
+.breakdown-item.is-disabled {
+  opacity: 0.85;
 }
 
 .item-score {

@@ -21,11 +21,41 @@
           </button>
         </div>
 
-        <el-switch
-          v-model="evaluationStore.includeLlmJudge"
-          active-text="启用 LLM Judge 裁判打分 (10% 权重)"
-          inline-prompt
-        />
+        <div class="judge-switch-box">
+          <el-tooltip
+            placement="bottom"
+            effect="dark"
+            :show-after="100"
+          >
+            <template #content>
+              <div class="judge-tooltip-body">
+                <div class="tip-title">🤖 LLM 裁判打分模式说明</div>
+                <div class="tip-item">
+                  <span class="tip-tag on">开启</span>
+                  <span>调用大模型裁判对历史会话进行深度语义与意图质检，打分计入 <b>10%</b> 综合权重（耗时与 Token 开销略有增加）。</span>
+                </div>
+                <div class="tip-item">
+                  <span class="tip-tag off">关闭 (默认)</span>
+                  <span>关闭大模型以节省开销，综合评分公式自动重归一化为 <b>66.7% 规则合规 + 33.3% 用户反馈</b>。</span>
+                </div>
+              </div>
+            </template>
+            <div class="judge-label-wrap">
+              <span class="judge-text">LLM 裁判打分</span>
+              <el-icon class="judge-icon"><QuestionFilled /></el-icon>
+            </div>
+          </el-tooltip>
+          <el-switch
+            v-model="evaluationStore.includeLlmJudge"
+            :disabled="evaluationStore.isLoading"
+            active-text="开"
+            inactive-text="关"
+            inline-prompt
+            size="small"
+            class="judge-switch"
+            @change="handleJudgeChange"
+          />
+        </div>
       </div>
 
       <div class="topbar-right">
@@ -81,22 +111,32 @@
                 <span class="code-txt">{{ row.sessionId }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="规则得分 (60%)" width="120" align="center">
+            <el-table-column label="规则得分 (60%)" width="115" align="center">
               <template #default="{ row }">
                 <span class="score-badge rule">{{ formatScore(row.ruleScore) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="用户反馈 (30%)" width="120" align="center">
+            <el-table-column label="用户反馈 (30%)" width="125" align="center">
               <template #default="{ row }">
-                <span class="score-badge feed">{{ formatScore(row.userFeedbackScore) }}</span>
+                <span v-if="row.userFeedbackScore != null" class="score-badge feed" :title="`显式评分: ${row.metrics?.explicitFeedbackScore ?? '无'} / 隐式采纳: ${row.metrics?.implicitAdoptionScore ?? '无'}`">
+                  {{ formatScore(row.userFeedbackScore) }}
+                </span>
+                <span v-else class="score-badge disabled">无反馈</span>
               </template>
             </el-table-column>
             <el-table-column label="LLM 裁判 (10%)" width="120" align="center">
               <template #default="{ row }">
-                <span class="score-badge llm">{{ formatScore(row.llmJudgeScore) }}</span>
+                <span v-if="row.llmJudgeScore != null" class="score-badge llm">{{ formatScore(row.llmJudgeScore) }}</span>
+                <span v-else class="score-badge disabled">未启用</span>
               </template>
             </el-table-column>
-            <el-table-column label="综合分" width="100" align="center">
+            <el-table-column label="性能 (耗时/Token)" width="135" align="center">
+              <template #default="{ row }">
+                <span class="stat-meta">{{ row.metrics?.latencyMs != null ? `${row.metrics.latencyMs}ms` : '-' }}</span>
+                <span v-if="row.metrics?.tokenCost" class="stat-tokens"> / {{ row.metrics.tokenCost }}tok</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="综合分" width="95" align="center">
               <template #default="{ row }">
                 <strong>{{ formatScore(row.score) }}</strong>
               </template>
@@ -137,6 +177,10 @@ onMounted(async () => {
 
 function handleRangeChange(r: '1h' | 'today' | '7d' | '30d') {
   evaluationStore.selectedRange = r
+  evaluationStore.runEvaluation()
+}
+
+function handleJudgeChange() {
   evaluationStore.runEvaluation()
 }
 
@@ -184,13 +228,19 @@ function formatScore(score?: number): string {
 
 .range-chips {
   display: flex;
+  align-items: center;
   gap: 4px;
 }
 
 .range-chip {
   background: #f1f5f9;
   border: 1px solid #e2e8f0;
-  padding: 3px 10px;
+  padding: 0 10px;
+  height: 26px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 6px;
   font-size: 11.5px;
   color: #475569;
@@ -207,6 +257,52 @@ function formatScore(score?: number): string {
   color: #ffffff;
   border-color: #2563eb;
   font-weight: 600;
+}
+
+.judge-switch-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #f1f5f9;
+  padding: 0 8px;
+  height: 26px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  transition: all 0.15s ease;
+}
+
+.judge-switch-box:hover {
+  border-color: #cbd5e1;
+}
+
+.judge-label-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.judge-text {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #334155;
+  line-height: 1;
+}
+
+.judge-icon {
+  font-size: 12px;
+  color: #64748b;
+  transition: color 0.15s ease;
+}
+
+.judge-label-wrap:hover .judge-icon {
+  color: #2563eb;
+}
+
+.judge-switch {
+  --el-switch-on-color: #2563eb;
 }
 
 .topbar-right {
@@ -279,6 +375,20 @@ function formatScore(score?: number): string {
 .score-badge.rule { background: #eff6ff; color: #1d4ed8; }
 .score-badge.feed { background: #ecfdf5; color: #059669; }
 .score-badge.llm { background: #f5f3ff; color: #7c3aed; }
+.score-badge.disabled { background: #f1f5f9; color: #94a3b8; font-weight: 500; }
+
+.stat-meta {
+  font-family: monospace;
+  font-size: 11.5px;
+  color: #334155;
+  font-weight: 600;
+}
+
+.stat-tokens {
+  font-family: monospace;
+  font-size: 11px;
+  color: #64748b;
+}
 
 .inspect-btn {
   font-size: 11.5px;
@@ -289,5 +399,52 @@ function formatScore(score?: number): string {
 
 .inspect-btn:hover {
   text-decoration: underline;
+}
+</style>
+
+<style>
+.judge-tooltip-body {
+  max-width: 290px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #f8fafc;
+  padding: 3px 1px;
+}
+
+.judge-tooltip-body .tip-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: #93c5fd;
+  font-size: 12.5px;
+}
+
+.judge-tooltip-body .tip-item {
+  margin-bottom: 6px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.judge-tooltip-body .tip-item:last-child {
+  margin-bottom: 0;
+}
+
+.judge-tooltip-body .tip-tag {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.judge-tooltip-body .tip-tag.on {
+  background: rgba(34, 197, 94, 0.25);
+  color: #4ade80;
+}
+
+.judge-tooltip-body .tip-tag.off {
+  background: rgba(148, 163, 184, 0.25);
+  color: #cbd5e1;
 }
 </style>

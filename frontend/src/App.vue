@@ -18,23 +18,23 @@
       <nav class="nav-links">
         <router-link to="/travel/chat" class="nav-item" active-class="active">
           <el-icon><ChatDotRound /></el-icon>
-          <span>助手</span>
+          <span>规划助手</span>
         </router-link>
         <router-link to="/travel/orders" class="nav-item" active-class="active">
           <el-icon><List /></el-icon>
-          <span>订单</span>
+          <span>订单记录</span>
         </router-link>
         <router-link to="/travel/memory" class="nav-item" active-class="active">
           <el-icon><Cpu /></el-icon>
-          <span>Memory</span>
+          <span>记忆中心</span>
         </router-link>
         <router-link to="/admin/traces" class="nav-item" active-class="active">
           <el-icon><TrendCharts /></el-icon>
-          <span>Trace</span>
+          <span>链路追踪</span>
         </router-link>
         <router-link to="/admin/evaluations" class="nav-item" active-class="active">
           <el-icon><DataAnalysis /></el-icon>
-          <span>Evaluation</span>
+          <span>质量评测</span>
         </router-link>
       </nav>
 

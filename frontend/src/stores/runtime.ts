@@ -90,15 +90,61 @@ function parsePayload(val: any): any {
     )
   })
 
-  const isTraceBooking = computed(() => {
+  const isTraceRefunded = computed(() => {
     return events.value.some(e =>
-      e.eventType === 'BOOKING_STARTED' ||
+      e.eventType === 'ORDER_REFUNDED' ||
+      e.phase === 'REFUND' ||
+      (e.eventType === 'ORDER_STATUS_CHANGED' && (e.stateAfter === 'REFUNDED' || parsePayload(e.outputPayload)?.statusAfter === 'REFUNDED'))
+    )
+  })
+
+  const isTraceChanged = computed(() => {
+    return events.value.some(e =>
+      e.eventType === 'ORDER_CHANGED' ||
+      e.phase === 'CHANGE' ||
+      (e.eventType === 'ORDER_STATUS_CHANGED' && (e.stateAfter === 'CHANGED' || parsePayload(e.outputPayload)?.statusAfter === 'CHANGED'))
+    )
+  })
+
+  const isOrderRefunded = computed(() => {
+    if (isTraceRefunded.value) return true
+    const intentEvent = events.value.find(e => e.eventType === 'INTENT_RECOGNIZED' || e.eventType === 'INTENT_REVISED')
+    const currentIntent = parsePayload(intentEvent?.outputPayload)?.intent || intentEvent?.decision?.intent
+    if (currentIntent === 'ORDER_CANCEL') {
+      const lastMsg = chatStore.messages[chatStore.messages.length - 1]
+      if (lastMsg && (lastMsg.text?.includes('退票') || lastMsg.text?.includes('退款'))) {
+        return true
+      }
+    }
+    return false
+  })
+
+  const isOrderChanged = computed(() => {
+    if (isTraceChanged.value) return true
+    const intentEvent = events.value.find(e => e.eventType === 'INTENT_RECOGNIZED' || e.eventType === 'INTENT_REVISED')
+    const currentIntent = parsePayload(intentEvent?.outputPayload)?.intent || intentEvent?.decision?.intent
+    if (currentIntent === 'ORDER_CHANGE') {
+      const lastMsg = chatStore.messages[chatStore.messages.length - 1]
+      if (lastMsg && (lastMsg.text?.includes('改签') || lastMsg.text?.includes('已改'))) {
+        return true
+      }
+    }
+    return false
+  })
+
+  const isTraceBooking = computed(() => {
+    if (isOrderRefunded.value || isOrderChanged.value) return false
+    return events.value.some(e =>
+      (e.eventType === 'BOOKING_STARTED' && e.phase !== 'REFUND' && e.phase !== 'CHANGE') ||
       e.eventType === 'TASK_WAITING_USER' ||
       (e.eventType === 'ORDER_STATUS_CHANGED' && (e.stateAfter === 'BOOKING' || parsePayload(e.outputPayload)?.statusAfter === 'BOOKING'))
     )
   })
 
   const isOrderPaid = computed(() => {
+    if (isOrderRefunded.value || isOrderChanged.value) {
+      return false
+    }
     if (isTraceBooking.value && !isTracePaid.value) {
       return false
     }
@@ -109,6 +155,9 @@ function parsePayload(val: any): any {
   })
 
   const isWaitingPayment = computed(() => {
+    if (isOrderRefunded.value || isOrderChanged.value) {
+      return false
+    }
     if (isTraceBooking.value && !isTracePaid.value) {
       return true
     }
@@ -120,6 +169,11 @@ function parsePayload(val: any): any {
     if (isPlanTurn || isOrderQueryTurn) {
       return false
     }
+    const intentEvent = events.value.find(e => e.eventType === 'INTENT_RECOGNIZED' || e.eventType === 'INTENT_REVISED')
+    const currentIntent = parsePayload(intentEvent?.outputPayload)?.intent || intentEvent?.decision?.intent
+    if (currentIntent === 'ORDER_CANCEL' || currentIntent === 'ORDER_CHANGE') {
+      return false
+    }
     return !isSessionOrderPaid.value && hasSessionOrder.value
   })
 
@@ -127,6 +181,14 @@ function parsePayload(val: any): any {
   const currentTask = computed(() => {
     if (!traceDetail.value) return '等待任务触发'
     const evs = events.value
+
+    // 0. If order refunded or changed
+    if (isOrderRefunded.value) {
+      return '订单取消与全额退款'
+    }
+    if (isOrderChanged.value) {
+      return '行程改签与重选确认'
+    }
 
     // 1. If order paid / ticket issued
     if (isOrderPaid.value) {
@@ -197,7 +259,7 @@ function parsePayload(val: any): any {
   const activeAgent = computed(() => {
     if (!traceDetail.value) return 'TravelOrchestrator'
     const evs = events.value
-    if (isOrderPaid.value || isWaitingPayment.value) {
+    if (isOrderRefunded.value || isOrderChanged.value || isOrderPaid.value || isWaitingPayment.value) {
       return 'OrderWorker'
     }
     if (evs.some(e => e.eventType === 'ORDER_QUERIED' || e.eventType === 'TRIP_QUERIED')) {
@@ -346,6 +408,12 @@ function parsePayload(val: any): any {
         // 到了支付下单阶段：前三步保持标绿
         planStatus = 'SUCCESS'
         planSummary = '方案规划完成 · 已锁定推荐席位'
+      } else if (isOrderRefunded.value || currentIntent === 'ORDER_CANCEL') {
+        planStatus = 'SKIPPED'
+        planSummary = '退票取消业务 · 本次跳过路线求解'
+      } else if (isOrderChanged.value) {
+        planStatus = 'SUCCESS'
+        planSummary = '改签方案规划 · 席位已锁定'
       } else if (hasSessionPlans.value) {
         planStatus = 'SUCCESS'
         planSummary = '多模态路线规划完成 · 方案已生成'
@@ -371,8 +439,8 @@ function parsePayload(val: any): any {
     // Stage 4: OrderWorker
     // -------------------------------------------------------------
     const orderEvents = evs.filter(
-      e => e.phase === 'ORDER' || e.phase === 'TASK' || e.phase === 'PAYMENT' || e.phase === 'BOOKING' ||
-        ['BOOKING_STARTED', 'TASK_CREATED', 'TASK_PROGRESS', 'TASK_SUCCEEDED', 'ORDER_STATUS_CHANGED', 'ORDER_QUERIED', 'TRIP_QUERIED', 'PAYMENT_CONFIRMED', 'PAYMENT_DETECTED'].includes(e.eventType)
+      e => e.phase === 'ORDER' || e.phase === 'TASK' || e.phase === 'PAYMENT' || e.phase === 'BOOKING' || e.phase === 'REFUND' || e.phase === 'CHANGE' ||
+        ['BOOKING_STARTED', 'TASK_CREATED', 'TASK_PROGRESS', 'TASK_SUCCEEDED', 'ORDER_STATUS_CHANGED', 'ORDER_QUERIED', 'TRIP_QUERIED', 'PAYMENT_CONFIRMED', 'PAYMENT_DETECTED', 'ORDER_REFUNDED', 'ORDER_CHANGED'].includes(e.eventType)
     )
     let orderStatus: PipelineStage['status'] = 'PENDING'
     let orderSummary = '就绪 · 等待用户选定下单'
@@ -382,7 +450,13 @@ function parsePayload(val: any): any {
       orderLatency = orderEvents.reduce((acc, cur) => acc + (cur.latencyMs || 0), 0)
     }
 
-    if (isOrderPaid.value) {
+    if (isOrderRefunded.value) {
+      orderStatus = 'SUCCESS'
+      orderSummary = '全额原路退款已办理 · 订单状态已变更为已退票'
+    } else if (isOrderChanged.value) {
+      orderStatus = 'SUCCESS'
+      orderSummary = '车票改签办理完成 · 新席位已确认'
+    } else if (isOrderPaid.value) {
       // 如果支付完了的话，最后一步也会被标绿喵！
       orderStatus = 'SUCCESS'
       orderSummary = '支付确认成功 · 席位出票完成'
@@ -431,7 +505,7 @@ function parsePayload(val: any): any {
       {
         id: 'stage-4',
         name: 'OrderWorker',
-        role: '履约状态机与支付确认',
+        role: isOrderRefunded.value ? '履约状态机与退款确认' : (isOrderChanged.value ? '履约状态机与改签确认' : '履约状态机与支付确认'),
         status: orderStatus,
         latencyMs: orderLatency,
         summary: orderSummary,
@@ -607,6 +681,8 @@ function parsePayload(val: any): any {
     pipelineStages,
     memoryItems,
     isOrderPaid,
+    isOrderRefunded,
+    isOrderChanged,
     isWaitingPayment,
     hasSessionPlans,
     fetchTrace,

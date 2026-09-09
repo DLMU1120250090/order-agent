@@ -153,6 +153,7 @@
 <script setup lang="ts">
 defineOptions({ name: 'ChatView' })
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useChatStore, QUICK_QUESTIONS } from '@/stores/chat'
 import { useRuntimeStore } from '@/stores/runtime'
 import { useUserStore } from '@/stores/user'
@@ -162,6 +163,8 @@ import AgentStatus from '@/components/runtime/AgentStatus.vue'
 import MemoryContext from '@/components/runtime/MemoryContext.vue'
 import TracePreview from '@/components/runtime/TracePreview.vue'
 
+const route = useRoute()
+const router = useRouter()
 const chatStore = useChatStore()
 const runtimeStore = useRuntimeStore()
 const userStore = useUserStore()
@@ -173,10 +176,34 @@ const currentSessionTitle = computed(() => {
   return current?.title || '新出行规划会话'
 })
 
+async function checkRoutePrompt() {
+  const prompt = (route.query.prompt as string)?.trim()
+  if (prompt && !chatStore.isSending) {
+    // Clean query parameter from URL to prevent accidental resend on page refresh
+    router.replace({ path: '/travel/chat' })
+    await nextTick()
+    if (!chatStore.sessionId) {
+      await chatStore.initSession()
+    }
+    await chatStore.sendMessage(prompt)
+    nextTick(() => scrollToBottom())
+  }
+}
+
 onMounted(async () => {
   await chatStore.initSession()
   scrollToBottom()
+  await checkRoutePrompt()
 })
+
+watch(
+  () => route.query.prompt,
+  async (newPrompt) => {
+    if (newPrompt) {
+      await checkRoutePrompt()
+    }
+  }
+)
 
 // Refetch if user changes
 watch(
