@@ -213,6 +213,8 @@ class ItineraryPlanner:
         if not slots.budget:
             return None
         label = slots.budget[0]
+        if label in ("不限预算", "不限", "无要求"):
+            return None
         tier = {"经济型": BudgetTier.economy, "舒适型": BudgetTier.comfort, "高端型": BudgetTier.premium}.get(label)
         if not tier:
             return None
@@ -233,7 +235,12 @@ class ItineraryPlanner:
         return settings.budget_tiers().get(tier.value)
 
     def _preferred_modes(self, slots: TravelSlotBundle) -> set:
-        mapping = {"飞机": TransportMode.FLIGHT, "高铁": TransportMode.TRAIN, "火车": TransportMode.TRAIN, "大巴": TransportMode.BUS}
+        mapping = {
+            "飞机": TransportMode.FLIGHT, "机票": TransportMode.FLIGHT, "机票优先": TransportMode.FLIGHT,
+            "高铁": TransportMode.TRAIN, "高铁优先": TransportMode.TRAIN,
+            "火车": TransportMode.TRAIN, "普通火车": TransportMode.TRAIN, "火车优先": TransportMode.TRAIN,
+            "大巴": TransportMode.BUS,
+        }
         return {mapping[m].value for m in slots.transportMode if m in mapping}
 
     def _preference_score(self, legs: List[TransportLeg], preferred: set) -> float:

@@ -401,13 +401,15 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
         chain = chain.chain
 
     start_time_ns = time.time_ns()
+    cb_cm = None
     cb = None
     try:
         from langchain_community.callbacks import get_openai_callback
-        cb = get_openai_callback()
-        cb.__enter__()
+        cb_cm = get_openai_callback()
+        cb = cb_cm.__enter__()
     except Exception:
         cb = None
+        cb_cm = None
 
     try:
         # 判断是异步 chain.ainvoke 还是同步 invoke
@@ -421,7 +423,7 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
         token_usage = None
         output_text = None
 
-        if cb and cb.total_tokens > 0:
+        if cb and getattr(cb, "total_tokens", 0) > 0:
             token_usage = {
                 "prompt_tokens": cb.prompt_tokens,
                 "completion_tokens": cb.completion_tokens,
@@ -458,8 +460,8 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
             )
         raise e
     finally:
-        if cb:
+        if cb_cm:
             try:
-                cb.__exit__(None, None, None)
+                cb_cm.__exit__(None, None, None)
             except Exception:
                 pass

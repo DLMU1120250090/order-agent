@@ -358,6 +358,7 @@ class TravelOrchestratorService:
         # ③.5 Memory 推断值确认快捷路径（Commit 2）
         # 处于 CLARIFY 且有待确认推断字段时：简短肯定 → 直接按记忆默认值规划；
         # 其它回复（否定/补充修正）→ 清空待确认项，走标准意图流重新理解。
+        prior_confirms = []
         if state.phase == SessionPhase.CLARIFY and state.pendingConfirms:
             brief = text.strip().strip("。！!～~ ")
             if MEMORY_CONFIRM_PATTERN.match(brief):
@@ -368,6 +369,7 @@ class TravelOrchestratorService:
                     confidence=1.0,
                 )
                 return await self._handle_plan(db, user_id, text, state, ctx, agent_set, empty_revised, adjust=False)
+            prior_confirms = list(state.pendingConfirms)
             state = state.model_copy(update={"pendingConfirms": []})
             await self._save_state(db, state)
 
@@ -453,7 +455,7 @@ class TravelOrchestratorService:
         ctx.record_event("INTENT_REVISED", "INTENT", raw_intent.model_dump(), revised.model_dump())
         target = Intent(revised.intent)
         ctx.record_event("ROUTE_SELECTED", "ROUTE", revised.model_dump(), {"route": target.value})
-        return await self._route(db, user_id, text, state, ctx, agent_set, revised, target)
+        return await self._route(db, user_id, text, state, ctx, agent_set, revised, target, prior_confirms=prior_confirms)
 
     # ---------- 路由分发 ----------
 
@@ -467,11 +469,12 @@ class TravelOrchestratorService:
         agent_set,
         revised: IntentResultSchema,
         intent: Intent,
+        prior_confirms: Optional[List[str]] = None,
     ) -> OutboundMessage:
         if intent in (Intent.PLAN_RECOMMENDATION, Intent.CLARIFY_NEEDED):
-            return await self._handle_plan(db, user_id, text, state, ctx, agent_set, revised, adjust=False)
+            return await self._handle_plan(db, user_id, text, state, ctx, agent_set, revised, adjust=False, prior_confirms=prior_confirms)
         if intent == Intent.PLAN_ADJUST:
-            return await self._handle_plan(db, user_id, text, state, ctx, agent_set, revised, adjust=True)
+            return await self._handle_plan(db, user_id, text, state, ctx, agent_set, revised, adjust=True, prior_confirms=prior_confirms)
         if intent == Intent.PLAN_BOOK:
             return await self._handle_book(db, user_id, text, state, ctx)
         if intent == Intent.ORDER_QUERY:
@@ -498,6 +501,7 @@ class TravelOrchestratorService:
         agent_set,
         revised: IntentResultSchema,
         adjust: bool,
+        prior_confirms: Optional[List[str]] = None,
     ) -> OutboundMessage:
         # 调整方案即对上一批推荐的负向反馈（非 Web 通道也能通过对话产生反馈）
         if adjust:
@@ -522,9 +526,10 @@ class TravelOrchestratorService:
 
         # Commit 2：Memory Resolver —— L1/L3 补全缺失字段并标记来源；高影响推断字段需确认
         profile = await self.memory.get_profile(db, user_id)
+        effective_confirms = list(set((state.pendingConfirms or []) + (prior_confirms or [])))
         resolved = self.memory_resolver.resolve(
             merged, profile,
-            confirmed_fields=state.pendingConfirms or [],
+            confirmed_fields=effective_confirms,
             current_passenger_id=state.currentPassengerId,
         )
         planning_slots = resolved.slots
@@ -1706,7 +1711,10 @@ class TravelOrchestratorService:
                 if m_ret2:
                     slots.returnDate.append(m_ret2.group(1).strip())
 
-        budget_map = {"经济": "经济型", "舒适": "舒适型", "高端": "高端型", "豪华": "高端型", "穷游": "经济型"}
+        budget_map = {
+            "不限预算": "不限预算", "不限": "不限预算", "无预算要求": "不限预算",
+            "经济": "经济型", "舒适": "舒适型", "高端": "高端型", "豪华": "高端型", "穷游": "经济型"
+        }
         for kw, val in budget_map.items():
             if kw in text and val not in slots.budget:
                 slots.budget.append(val)
@@ -1716,7 +1724,12 @@ class TravelOrchestratorService:
             if kw in text and val not in slots.travelStyle:
                 slots.travelStyle.append(val)
 
-        transport_map = {"飞机": "飞机", "航班": "飞机", "高铁": "高铁", "动车": "高铁", "火车": "火车", "大巴": "大巴"}
+        transport_map = {
+            "机票优先": "飞机", "机票": "飞机", "飞机": "飞机", "航班": "飞机",
+            "高铁优先": "高铁", "高铁": "高铁", "动车": "高铁",
+            "普通火车": "火车", "火车优先": "火车", "火车": "火车",
+            "大巴": "大巴"
+        }
         for kw, val in transport_map.items():
             if kw in text and val not in slots.transportMode:
                 slots.transportMode.append(val)
@@ -1726,13 +1739,14 @@ class TravelOrchestratorService:
             if kw in text and val not in slots.companion:
                 slots.companion.append(val)
 
-        # 乘车人员抽取（支持如“我选择：张三(本人)”或“本人/我一个人”等兜底模式）
-        choice_match = _re.search(r"我选择[：:]\s*([^\n，,]+)", text)
+        # 乘车人员抽取（支持如“我选择：张三(本人)”或“本人/我一个人”等兜底模式，且严格排除偏好选项关键词）
+        pref_keywords = ("机票", "飞机", "航班", "高铁", "动车", "火车", "大巴", "经济", "舒适", "高端", "预算", "不限", "商务", "休闲", "紧凑", "美食", "亲子", "无特别偏好")
+        choice_match = _re.search(r"我选择[：:]\s*([^\n]+)", text)
         if choice_match:
             raw_c = choice_match.group(1).strip()
             for item in _re.split(r"[,，、\s]+", raw_c):
                 name_clean = _re.sub(r"\(.*?\)|（.*?）", "", item).strip()
-                if name_clean and name_clean not in slots.passengers:
+                if name_clean and not any(pk in name_clean for pk in pref_keywords) and name_clean not in slots.passengers:
                     slots.passengers.append(name_clean)
         else:
             passenger_map = {"本人": "本人", "只有我": "本人", "我一个人": "本人", "就我": "本人"}
