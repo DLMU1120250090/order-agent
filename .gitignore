@@ -17,6 +17,10 @@ backend/memory/
 *.log
 backend/*.db
 
+# 本地面试/导游文档（不入库）
+/导学-出行Agent.md
+/面经-出行Agent.md
+
 # 本地历史与编辑器
 .history/
 .idea/
