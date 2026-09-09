@@ -37,6 +37,7 @@ def test_booking_web_channel_does_not_push_redundant_image():
             from app.services.booking import browser_order
             mp.setattr(browser_order, "place_and_capture_qr", AsyncMock(return_value="/media/test.png"))
             mp.setattr(order_crud, "update_order", AsyncMock())
+            mp.setattr(order_crud, "get_order_by_id", AsyncMock(return_value=order))
             mp.setattr(task_crud, "update_task", AsyncMock())
 
             result = await service.execute_booking(db, "task_123", order)

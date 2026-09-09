@@ -77,6 +77,7 @@ class OrderStatus(str, Enum):
     CHANGED = "CHANGED"
     CHANGE_CANCELLED = "CHANGE_CANCELLED"
     REFUNDING = "REFUNDING"
+    COMPLETED = "COMPLETED"
 
 
 class TaskStatus(str, Enum):

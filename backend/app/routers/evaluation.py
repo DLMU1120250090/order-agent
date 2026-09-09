@@ -1,6 +1,7 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
 from sqlalchemy import desc, select
@@ -19,6 +20,16 @@ router = APIRouter(tags=["travel-evaluation-debug"])
 judge_agent = EvaluationJudgeAgent()
 evaluation_service = EvaluationService(judge_agent)
 
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _to_beijing(dt: Optional[datetime]) -> Optional[datetime]:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BEIJING_TZ)
+
 
 def to_trace_row_out(row: RequestTraceRow) -> TraceRowOut:
     return TraceRowOut(
@@ -32,13 +43,13 @@ def to_trace_row_out(row: RequestTraceRow) -> TraceRowOut:
         runId=row.run_id,
         taskId=row.task_id,
         traceJson=row.trace_json,
-        createdAt=row.created_at,
-        updatedAt=row.updated_at,
+        createdAt=_to_beijing(row.created_at),
+        updatedAt=_to_beijing(row.updated_at),
         expectedIntent=row.expected_intent,
         expectedSlots=row.expected_slots,
         expectedClarifyAction=row.expected_clarify_action,
         labeledBy=row.labeled_by,
-        labeledAt=row.labeled_at,
+        labeledAt=_to_beijing(row.labeled_at),
         labelNote=row.label_note,
     )
 
@@ -104,6 +115,10 @@ async def find_by_time_range(
         endAt = now
     if startAt is None:
         startAt = endAt - timedelta(days=7)
+    if startAt.tzinfo:
+        startAt = startAt.astimezone(timezone.utc).replace(tzinfo=None)
+    if endAt.tzinfo:
+        endAt = endAt.astimezone(timezone.utc).replace(tzinfo=None)
     if startAt >= endAt:
         raise HTTPException(status_code=400, detail="Trace 查询时间范围不合法")
     safe_limit = max(1, min(1000, limit or 200))

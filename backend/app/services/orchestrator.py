@@ -325,9 +325,18 @@ class TravelOrchestratorService:
         state: SessionState,
         ctx: TraceContext,
     ) -> OutboundMessage:
-        # ① 支付确认快捷路径（BOOKING 阶段回复"付好了"）
-        if state.orderNo and state.phase == SessionPhase.BOOKING and self._contains_any(text, PAYMENT_CONFIRM_KEYWORDS):
-            return await self._confirm_payment(db, user_id, text, state, ctx)
+        # ① 支付确认快捷路径（回复"付好了" / "已支付"）
+        if self._contains_any(text, PAYMENT_CONFIRM_KEYWORDS):
+            order = None
+            if state.orderNo:
+                order = await order_crud.get_order_by_no(db, user_id, state.orderNo)
+            if not order:
+                order = await self._latest_active_order(db, user_id)
+            if order and order.status in (OrderStatus.BOOKING.value, OrderStatus.CONFIRMED.value, OrderStatus.DRAFT.value):
+                return await self._confirm_payment(db, user_id, text, state.model_copy(update={"orderNo": order.order_no}), ctx)
+            if order and order.status == OrderStatus.PAID.value:
+                msg = OutboundMessage(channel=state.channel.value, text=f"主人喵，订单【{order.order_no}】已经完成支付出票啦喵~ 随时可以查订单或办理退改喵！")
+                return self._finish(db, state, ctx, msg)
 
         # ② 改签/退票确认路径（ORDER 阶段）
         if state.orderNo and state.phase == SessionPhase.ORDER:
@@ -472,7 +481,7 @@ class TravelOrchestratorService:
         if intent == Intent.ORDER_CHANGE:
             return await self._handle_order_change(db, user_id, text, state, ctx, revised)
         if intent == Intent.ORDER_CANCEL:
-            return await self._handle_order_cancel(db, user_id, state, ctx)
+            return await self._handle_order_cancel(db, user_id, text, state, ctx)
         if intent == Intent.PRICE_MONITOR:
             return await self._handle_price_monitor(db, user_id, text, state, ctx)
         if intent == Intent.CHECKLIST_EXPORT:
@@ -1006,16 +1015,64 @@ class TravelOrchestratorService:
         ctx: TraceContext,
         revised: IntentResultSchema,
     ) -> OutboundMessage:
-        order = await self._latest_active_order(db, user_id)
+        target_order_no = None
+        m = re.search(r"ORD\d+", text or "")
+        if m:
+            target_order_no = m.group(0)
+        elif state.orderNo:
+            target_order_no = state.orderNo
+
+        order = None
+        if target_order_no:
+            order = await order_crud.get_order_by_no(db, user_id, target_order_no)
         if not order:
-            msg = OutboundMessage(channel=state.channel.value, text="没有可改签的订单。")
+            order = await self._latest_active_order(db, user_id)
+
+        if not order:
+            msg = OutboundMessage(channel=state.channel.value, text="主人喵，鱼鱼没有找到可以改签的有效订单喵~")
+            return self._finish(db, state, ctx, msg)
+
+        # 状态互斥校验：已退票/已改签/处理中订单拦截
+        if order.status in (OrderStatus.REFUNDED.value, OrderStatus.CANCELLED.value):
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】已经处于退票/取消状态，无法办理改签了喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status == OrderStatus.REFUNDING.value:
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】正在退票处理中，不能办理改签喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status == OrderStatus.CHANGED.value:
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】已经办理过一次改签啦，根据铁路/航司客规，每笔订单仅支持改签一次，不能再次改签了喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status == OrderStatus.CHANGING.value:
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】正在改签处理中，请稍候查看改签结果，无需重复申请喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status not in (OrderStatus.PAID.value, OrderStatus.CONFIRMED.value):
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】当前状态为【{order.status}】，暂不支持改签操作喵~",
+            )
             return self._finish(db, state, ctx, msg)
 
         merged = self._merge_slots(state.slots, revised.slots)
         merged, fuzzy = await self._resolve_dates(db, merged)
         target_date = (merged.tripDate or [None])[0]
         if not target_date:
-            msg = OutboundMessage(channel=state.channel.value, text="改到哪一天？告诉我具体日期，我来对比方案。")
+            msg = OutboundMessage(channel=state.channel.value, text="主人想改到哪一天呢喵？请告诉我具体出行日期，鱼鱼来为您对比改签方案喵~")
             new_state = state.model_copy(update={"phase": SessionPhase.ORDER, "slots": merged, "orderNo": order.order_no})
             await self._save_state(db, new_state)
             return self._finish(db, new_state, ctx, msg)
@@ -1038,10 +1095,27 @@ class TravelOrchestratorService:
         return self._finish(db, new_state, ctx, msg)
 
     async def _confirm_change(self, db: AsyncSession, user_id: int, text: str, state: SessionState, ctx: TraceContext) -> OutboundMessage:
-        order = await self._latest_active_order(db, user_id)
+        target_order_no = None
+        m = re.search(r"ORD\d+", text or "")
+        if m:
+            target_order_no = m.group(0)
+        elif state.orderNo:
+            target_order_no = state.orderNo
+
+        order = None
+        if target_order_no:
+            order = await order_crud.get_order_by_no(db, user_id, target_order_no)
         if not order:
-            msg = OutboundMessage(channel=state.channel.value, text="没有可改签的订单。")
+            order = await self._latest_active_order(db, user_id)
+
+        if not order:
+            msg = OutboundMessage(channel=state.channel.value, text="主人喵，没有可改签的订单喵。")
             return self._finish(db, state, ctx, msg)
+
+        if order.status in (OrderStatus.REFUNDED.value, OrderStatus.CANCELLED.value, OrderStatus.CHANGED.value, OrderStatus.CHANGING.value, OrderStatus.REFUNDING.value):
+            msg = OutboundMessage(channel=state.channel.value, text=f"主人喵，订单【{order.order_no}】当前状态为【{order.status}】，不支持改签喵~")
+            return self._finish(db, state, ctx, msg)
+
         target_date = (state.slots.tripDate or [None])[0] or (await self._today_plus(2))
         profile = await self.memory.get_profile(db, user_id)
         decision = await self.change_decision.decide(
@@ -1057,7 +1131,7 @@ class TravelOrchestratorService:
             channel=state.channel.value, session_id=state.sessionId, order_id=order.id,
         )
         asyncio.create_task(self.task_service.run(task_id, lambda db: self.booking.execute_change(db, task_id, order, decision)))
-        ctx.record_event("BOOKING_STARTED", "CHANGE", {"orderNo": order.order_no}, {"taskId": task_id, "decision": decision.reason})
+        ctx.record_event(EventType.ORDER_CHANGED, "CHANGE", {"orderNo": order.order_no}, {"taskId": task_id, "decision": decision.reason})
         await record_user_event(
             db, user_id=user_id, event_type=UserEventType.CHANGE_CONFIRMED,
             session_id=state.sessionId, task_id=task_id, trace_id=ctx.trace_id, order_no=order.order_no,
@@ -1071,52 +1145,113 @@ class TravelOrchestratorService:
         )
         return self._finish(db, state, ctx, msg)
 
-    async def _handle_order_cancel(self, db: AsyncSession, user_id: int, state: SessionState, ctx: TraceContext) -> OutboundMessage:
-        order = await self._latest_active_order(db, user_id)
+    async def _handle_order_cancel(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        text: str,
+        state: SessionState,
+        ctx: TraceContext,
+    ) -> OutboundMessage:
+        target_order_no = None
+        m = re.search(r"ORD\d+", text or "")
+        if m:
+            target_order_no = m.group(0)
+        elif state.orderNo:
+            target_order_no = state.orderNo
+
+        order = None
+        if target_order_no:
+            order = await order_crud.get_order_by_no(db, user_id, target_order_no)
         if not order:
-            msg = OutboundMessage(channel=state.channel.value, text="没有可退票的订单。")
+            order = await self._latest_active_order(db, user_id)
+
+        if not order:
+            msg = OutboundMessage(channel=state.channel.value, text="主人喵，鱼鱼没有找到可以退票的有效订单喵~")
             return self._finish(db, state, ctx, msg)
-        profile = await self.memory.get_profile(db, user_id)
-        decision = await self.change_decision.decide(
-            db,
-            ChangeRequest(order_no=order.order_no, scenario=ChangeScenario.USER_CANCEL),
-            order,
-            profile,
-            context=await self.memory_builder.build_for_change(db, user_id, order),
+
+        # 状态机互斥校验：已退票/已改签/处理中订单拦截
+        if order.status in (OrderStatus.REFUNDED.value, OrderStatus.CANCELLED.value):
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】已经处于退票/取消状态啦，不能再次申请退票或改签了喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status == OrderStatus.REFUNDING.value:
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】正在退票处理中，款项会原路退回，请勿重复申请喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status == OrderStatus.CHANGING.value:
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】正在改签处理中，请稍候查看改签结果，暂不可申请退票喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status == OrderStatus.CHANGED.value:
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】已经办理过改签啦，根据客运规定已改签订单不可再次办理退改喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        if order.status not in (OrderStatus.PAID.value, OrderStatus.CONFIRMED.value):
+            msg = OutboundMessage(
+                channel=state.channel.value,
+                text=f"主人喵，订单【{order.order_no}】当前状态为【{order.status}】，暂不支持退票操作喵~",
+            )
+            return self._finish(db, state, ctx, msg)
+
+        # 退票直接退：无需再走损失模型两阶段对比
+        task_id = await self.task_service.create(
+            db, user_id, TaskType.refund.value,
+            {"order_no": order.order_no}, channel=state.channel.value, session_id=state.sessionId, order_id=order.id,
         )
-        ctx.record_event("ORDER_CHANGE_DECISION", "DECISION", {"scenario": "USER_CANCEL"}, decision.model_dump())
+        await self.booking.execute_refund(db, task_id, order)
+        ctx.record_event(EventType.ORDER_REFUNDED, "REFUND", {"orderNo": order.order_no}, {"taskId": task_id, "refundAmount": float(order.price or 0)})
+        await record_user_event(
+            db, user_id=user_id, event_type=UserEventType.REFUND_CONFIRMED,
+            session_id=state.sessionId, task_id=task_id, trace_id=ctx.trace_id, order_no=order.order_no,
+            context={"refundAmount": float(order.price or 0)},
+        )
+
+        legs_data = (order.legs or {}).get("legs", []) if isinstance(order.legs, dict) else []
+        route_desc = f"{legs_data[0].get('from_city', '')} ➔ {legs_data[-1].get('to_city', '')}" if legs_data else "行程车票"
+        vehicle_code = legs_data[0].get("vehicle_no") if legs_data else None
+        vehicle_desc = f"（{vehicle_code}）" if vehicle_code else ""
+        price = float(order.price or 0)
+
+        refund_text = (
+            f"主人喵~ 订单【{order.order_no}】已经为您成功办理退票与退款啦！🎉\n\n"
+            f"• **退票车票**：{route_desc} {vehicle_desc}\n"
+            f"• **退款金额**：¥{price:.2f}（全额原路退款，0 手续费）\n"
+            f"• **退款渠道**：原支付方式原路退回\n"
+            f"• **预计到账**：1~3 个工作日内\n"
+            f"• **订单状态**：【已全额退票】\n\n"
+            f"鱼鱼已经把订单中心的履约状态更新为【已退票】啦，主人可以安心去吃香喷喷的白米饭咯喵~ (开心地摆摆尾巴)"
+        )
+
         new_state = state.model_copy(update={
             "phase": SessionPhase.ORDER,
             "currentIntent": Intent.ORDER_CANCEL,
             "orderNo": order.order_no,
         })
         await self._save_state(db, new_state)
-        msg = self._decision_card(state.channel.value, decision, prefix="🗑 退票方案")
+
+        msg = OutboundMessage(
+            channel=state.channel.value,
+            kind="CARD",
+            text=refund_text,
+            task_progress={"taskId": task_id, "status": "SUCCESS", "progress": 100},
+        )
         return self._finish(db, new_state, ctx, msg)
 
     async def _confirm_cancel(self, db: AsyncSession, user_id: int, text: str, state: SessionState, ctx: TraceContext) -> OutboundMessage:
-        order = await self._latest_active_order(db, user_id)
-        if not order:
-            msg = OutboundMessage(channel=state.channel.value, text="没有可退票的订单。")
-            return self._finish(db, state, ctx, msg)
-        task_id = await self.task_service.create(
-            db, user_id, TaskType.refund.value,
-            {"order_no": order.order_no}, channel=state.channel.value, session_id=state.sessionId, order_id=order.id,
-        )
-        asyncio.create_task(self.task_service.run(task_id, lambda db: self.booking.execute_refund(db, task_id, order)))
-        ctx.record_event("BOOKING_STARTED", "REFUND", {"orderNo": order.order_no}, {"taskId": task_id})
-        await record_user_event(
-            db, user_id=user_id, event_type=UserEventType.REFUND_CONFIRMED,
-            session_id=state.sessionId, task_id=task_id, trace_id=ctx.trace_id, order_no=order.order_no,
-            context={},
-        )
-        msg = OutboundMessage(
-            channel=state.channel.value,
-            kind="TASK_PROGRESS",
-            text=f"退票任务已启动（{task_id}），正在处理…",
-            task_progress={"taskId": task_id, "status": "RUNNING", "progress": 10},
-        )
-        return self._finish(db, state, ctx, msg)
+        return await self._handle_order_cancel(db, user_id, text, state, ctx)
 
     async def _handle_price_monitor(self, db: AsyncSession, user_id: int, text: str, state: SessionState, ctx: TraceContext) -> OutboundMessage:
         profile = await self.memory.get_profile(db, user_id)
@@ -1290,11 +1425,39 @@ class TravelOrchestratorService:
                 lines.append(f"  风险：{risk}")
         lines.append(f"推荐：{decision.reason}")
         lines.append("回复“确认改签”/“确认退票”执行。")
+
+        req = getattr(decision, "request", None)
+        rec = getattr(decision, "recommended", None)
+        rec_kind = rec.kind.value if (rec and hasattr(rec.kind, "value")) else ("CHANGE" if rec else None)
+
+        decision_block = {
+            "blockType": "CHANGE_DECISION",
+            "orderNo": getattr(req, "order_no", None),
+            "targetDate": getattr(req, "target_date", None),
+            "reason": decision.reason,
+            "recommendedKind": rec_kind,
+            "options": [
+                {
+                    "kind": o.kind.value if hasattr(o.kind, "value") else str(o.kind),
+                    "old_price": float(o.old_price or 0),
+                    "new_price": float(o.new_price or 0),
+                    "change_fee": float(o.change_fee or 0),
+                    "refund_fee": float(o.refund_fee or 0),
+                    "total_loss": float(o.total_loss or 0),
+                    "risks": o.risks or [],
+                    "original_leg": o.original_leg,
+                    "new_leg": o.new_leg,
+                    "detail": o.detail or {},
+                }
+                for o in decision.options
+            ],
+        }
+
         return OutboundMessage(
             channel=channel,
             kind="CARD",
             text="\n".join(lines),
-            blocks=[o.model_dump() for o in decision.options],
+            blocks=[decision_block, *(o.model_dump() for o in decision.options)],
         )
 
     async def _resolve_dates(self, db, slots: TravelSlotBundle):

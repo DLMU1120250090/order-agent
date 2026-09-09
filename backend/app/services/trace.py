@@ -401,6 +401,14 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
         chain = chain.chain
 
     start_time_ns = time.time_ns()
+    cb = None
+    try:
+        from langchain_community.callbacks import get_openai_callback
+        cb = get_openai_callback()
+        cb.__enter__()
+    except Exception:
+        cb = None
+
     try:
         # 判断是异步 chain.ainvoke 还是同步 invoke
         if hasattr(chain, "ainvoke"):
@@ -413,9 +421,15 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
         token_usage = None
         output_text = None
 
-        # 尝试提取 LangChain 各种标准对象携带的 Token 使用量元数据和内容字段
-        if hasattr(response, "response_metadata"):
+        if cb and cb.total_tokens > 0:
+            token_usage = {
+                "prompt_tokens": cb.prompt_tokens,
+                "completion_tokens": cb.completion_tokens,
+                "total_tokens": cb.total_tokens,
+            }
+        elif hasattr(response, "response_metadata"):
             token_usage = response.response_metadata.get("token_usage")
+
         if hasattr(response, "content"):
             output_text = response.content
         else:
@@ -443,3 +457,9 @@ async def traced_agent_call(agent_name: str, model_name: str, chain: Any, inputs
                 error=e,
             )
         raise e
+    finally:
+        if cb:
+            try:
+                cb.__exit__(None, None, None)
+            except Exception:
+                pass

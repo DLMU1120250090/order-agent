@@ -120,6 +120,13 @@ class BookingService:
                 log.warning("Playwright 下单失败，回退 Mock 二维码: order=%s err=%s", order.order_no, e)
         if not qr_path:
             qr_path = await self._resolve_qr_path(order.order_no)
+
+        # 检查订单是否已被用户在并发请求中提前支付或取消
+        latest = await order_crud.get_order_by_id(db, order.id)
+        if latest and latest.status in (OrderStatus.PAID.value, OrderStatus.REFUNDED.value, OrderStatus.COMPLETED.value):
+            log.info("订单 %s 已处于 %s，后台下单任务跳过置为待支付", order.order_no, latest.status)
+            return {"status": latest.status, "order_no": order.order_no, "waiting": False}
+
         await order_crud.update_order(db, order.id, status=OrderStatus.BOOKING.value)
         await self.task_service.update_progress(db, task_id, 70, "收银台已生成支付二维码")
         # 二维码结果先落任务 result，供前端在 WAITING_USER 期间展示
@@ -206,14 +213,29 @@ class BookingService:
         return order
 
     async def order_detail(self, db: AsyncSession, user_id: int, order_no: str) -> Optional[OrderDraftOut]:
+        from sqlalchemy import select
+        from app.models.database import TravelTripRow
+
         row = await order_crud.get_order_by_no(db, user_id, order_no)
         if not row:
             return None
-        return self._to_out(row)
+        trip = None
+        if row.trip_id:
+            trip = (await db.execute(select(TravelTripRow).where(TravelTripRow.id == row.trip_id))).scalar_one_or_none()
+        return self._to_out(row, trip=trip)
 
     async def list_orders(self, db: AsyncSession, user_id: int) -> List[OrderDraftOut]:
+        from sqlalchemy import select
+        from app.models.database import TravelTripRow
+
         rows = await order_crud.list_orders(db, user_id)
-        return [self._to_out(r) for r in rows]
+        trip_ids = [r.trip_id for r in rows if r.trip_id]
+        trip_map = {}
+        if trip_ids:
+            res = await db.execute(select(TravelTripRow).where(TravelTripRow.id.in_(trip_ids)))
+            for t in res.scalars().all():
+                trip_map[t.id] = t
+        return [self._to_out(r, trip=trip_map.get(r.trip_id)) for r in rows]
 
     async def execute_change(self, db: AsyncSession, task_id: str, order: TravelOrderRow, decision: ChangeDecision) -> TravelOrderRow:
         """改签执行（Mock）：CHANGING → CHANGED，订单 legs 更新为新方案。"""
@@ -271,7 +293,13 @@ class BookingService:
         return row
 
     @staticmethod
-    def _to_out(row: TravelOrderRow) -> OrderDraftOut:
+    def _to_out(row: TravelOrderRow, trip: Optional[Any] = None) -> OrderDraftOut:
+        trip_date = str(trip.start_date) if (trip and getattr(trip, "start_date", None)) else None
+        if not trip_date and row.created_at:
+            trip_date = row.created_at.strftime("%Y-%m-%d")
+
+        created_at_str = row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None
+
         return OrderDraftOut(
             order_no=row.order_no,
             supplier=row.supplier,
@@ -281,4 +309,6 @@ class BookingService:
             tax_fee=row.tax_fee,
             passengers=(row.passengers or {}).get("list", []),
             legs=(row.legs or {}).get("legs", []),
+            created_at=created_at_str,
+            trip_date=trip_date,
         )

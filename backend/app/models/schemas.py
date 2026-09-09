@@ -278,6 +278,8 @@ class OrderDraftOut(BaseModel):
     legs: List[dict] = Field(default_factory=list)
     qr_image_path: Optional[str] = None
     pending: Optional[str] = None  # PAYMENT / MANUAL_STEP / USER_CONFIRM
+    created_at: Optional[str] = None
+    trip_date: Optional[str] = None
 
 
 class TaskOut(BaseModel):

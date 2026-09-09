@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -86,17 +87,42 @@ class EvaluationService:
             for fb in fb_res.scalars().all():
                 feedbacks_dict.setdefault(fb.session_id, []).append(fb)
 
-        trace_results = []
-        for t in traces:
-            res = await self._evaluate_single_trace(t, feedbacks_dict.get(t.session_id, []), request.includeLlmJudge)
-            trace_results.append(res)
+        # 针对大模型裁判打分：抽样最新具备用户交互应答文本（finalText）的 MAX_JUDGE_SAMPLES 条会话并发质检，防止长串行调用与无应答任务误判
+        MAX_JUDGE_SAMPLES = 10
+        judged_trace_ids = set()
+        if request.includeLlmJudge:
+            for t in traces:
+                snap = self._parse_trace_json(t)
+                if snap.get("finalText") and str(snap.get("finalText")).strip():
+                    judged_trace_ids.add(t.trace_id)
+                    if len(judged_trace_ids) >= MAX_JUDGE_SAMPLES:
+                        break
+
+        trace_tasks = [
+            self._evaluate_single_trace(
+                t, feedbacks_dict.get(t.session_id, []), t.trace_id in judged_trace_ids
+            )
+            for t in traces
+        ]
+        trace_results = list(await asyncio.gather(*trace_tasks))
+
+        # 构建裁判打分缓存，用于链路层复用（避免重复调用大模型）
+        judge_cache: Dict[str, Any] = {}
+        for tr in trace_results:
+            if tr.llmJudgeScore is not None and tr.sessionId:
+                judge_cache[tr.sessionId] = {
+                    "llmJudgeScore": tr.llmJudgeScore,
+                    "explanationQuality": tr.metrics.get("explanationQuality"),
+                    "naturalness": tr.metrics.get("naturalness"),
+                    "judgeReason": tr.detail.get("judgeReason"),
+                }
 
         # ---- Commit 6：链路聚合（run_id/task_id 优先，其次 session_id；孤立 trace 自成一链）----
         groups: Dict[str, List[RequestTraceRow]] = {}
         for t in traces:
             groups.setdefault(self._link_key(t), []).append(t)
 
-        link_results = []
+        link_tasks = []
         for rows in groups.values():
             rows_sorted = sorted(rows, key=lambda r: r.created_at)
             merged = self._merge_trace_rows(rows_sorted)
@@ -108,15 +134,43 @@ class EvaluationService:
                         seen_fb.add(id(fb))
                         link_feedbacks.append(fb)
             ground_truth = await self._order_ground_truth(db, user_id, merged)
-            link_results.append(await self._evaluate_single_trace(
-                merged, link_feedbacks, request.includeLlmJudge, ground_truth=ground_truth,
+            link_tasks.append(self._evaluate_single_trace(
+                merged, link_feedbacks, False, ground_truth=ground_truth,
             ))
+
+        link_results = list(await asyncio.gather(*link_tasks))
+
+        # 为包含已评测 Trace 的链路复用裁判分值，确保链路主指标与样本明细一致
+        if request.includeLlmJudge:
+            for lr in link_results:
+                if lr.sessionId and lr.sessionId in judge_cache:
+                    cached = judge_cache[lr.sessionId]
+                    lr.llmJudgeScore = cached["llmJudgeScore"]
+                    lr.metrics["explanationQuality"] = cached["explanationQuality"]
+                    lr.metrics["naturalness"] = cached["naturalness"]
+                    lr.detail["judgeMode"] = "LLM_AS_JUDGE"
+                    lr.detail["judgeReason"] = cached["judgeReason"]
+                    # 重新计算加权总分
+                    rule_score = (lr.ruleScore or 0) / 100.0 if lr.ruleScore is not None else None
+                    llm_score = (lr.llmJudgeScore or 0) / 100.0 if lr.llmJudgeScore is not None else None
+                    fb_score = (lr.userFeedbackScore or 0) / 100.0 if lr.userFeedbackScore is not None else None
+                    lr.score = self._to_percent(self._weighted_score(rule_score, llm_score, fb_score))
 
         total_traces = len(traces)
         total_links = len(groups)
         labeled_traces = sum(1 for t in traces if t.expected_intent or t.expected_slots or t.expected_clarify_action)
         primary = link_results or trace_results
-        avg_score = self._average([tr.score for tr in primary])
+
+        # 宏观综合健康度评分：由客观规则、用户体验与大模型裁判三大维度的宏观均值自洽合成，确保与仪表盘公式在数学上 100% 严格一致
+        rule_avg = self._average([tr.ruleScore for tr in trace_results if tr.ruleScore is not None])
+        fb_avg = self._average([tr.userFeedbackScore for tr in trace_results if tr.userFeedbackScore is not None])
+        llm_avg = self._average([tr.llmJudgeScore for tr in trace_results if tr.llmJudgeScore is not None]) if request.includeLlmJudge else None
+
+        avg_score = self._to_percent(self._weighted_score(
+            (rule_avg / 100.0) if rule_avg is not None else None,
+            (llm_avg / 100.0) if llm_avg is not None else None,
+            (fb_avg / 100.0) if fb_avg is not None else None,
+        ))
 
         metrics_lists: Dict[str, List[float]] = {}
         for tr in primary:
@@ -233,12 +287,14 @@ class EvaluationService:
         metrics["notificationSent"] = 1.0 if snapshot.get("priceDropNotified") else None
 
         judge_result = None
-        if include_judge:
+        final_reply = snapshot.get("finalText")
+        # 仅对具备自然语言应答文本的会话调用大模型裁判，无文本的后台任务保留 None 走规则归一化
+        if include_judge and final_reply and str(final_reply).strip():
             judge_input = {
                 "predictedIntent": snapshot.get("intent"),
                 "predictedSlots": snapshot.get("slots"),
                 "predictedClarifyAction": snapshot.get("clarifyAction"),
-                "finalReply": snapshot.get("finalText"),
+                "finalReply": str(final_reply).strip(),
                 "planCount": snapshot.get("recommendationCount"),
                 "safetyComplianceByRule": snapshot.get("safetyCompliance"),
                 "hallucinationFreeByRule": snapshot.get("hallucinationFree"),
@@ -255,7 +311,9 @@ class EvaluationService:
             except Exception as e:  # noqa: BLE001
                 log.warning("大模型裁判调用失败 trace_id=%s: %s", row.trace_id, e)
 
-        fb_score = self._feedback_score(feedbacks)
+        fb_score, explicit_score, implicit_score = self._feedback_score(feedbacks, snapshot)
+        metrics["explicitFeedbackScore"] = self._to_percent(explicit_score)
+        metrics["implicitAdoptionScore"] = self._to_percent(implicit_score)
         failure_types = self._classify_failures(metrics, snapshot, feedbacks, row)
         rule_metrics = [
             metrics["intentAccuracy"],
@@ -294,6 +352,8 @@ class EvaluationService:
             "expectedSlots": self._parse_json_safe(row.expected_slots),
             "expectedClarifyAction": row.expected_clarify_action,
             "feedbackCount": len(feedbacks),
+            "explicitScore": self._to_percent(explicit_score),
+            "implicitScore": self._to_percent(implicit_score),
             "failureTypes": failure_types,
             "judgeMode": "LLM_AS_JUDGE" if include_judge else "DISABLED",
             "judgeReason": judge_result["reason"] if judge_result else None,
@@ -420,9 +480,9 @@ class EvaluationService:
                     plan_option_count = max(plan_option_count, int(output.get("optionCount") or len(ranked_ids)))
                 except (TypeError, ValueError):
                     plan_option_count = max(plan_option_count, len(ranked_ids))
-            elif ev_type == EventType.RESPONSE_READY:
-                final_text = output.get("speechText") or final_text
-                blocks = output.get("displayBlocks") or []
+            elif ev_type in (EventType.RESPONSE_READY, EventType.REQUEST_FINISHED):
+                final_text = output.get("text") or output.get("speechText") or output.get("content") or output.get("message") or final_text
+                blocks = output.get("displayBlocks") or output.get("blocks") or []
                 for b in blocks:
                     if isinstance(b, dict) and b.get("planId"):
                         response_ids.add(str(b.get("planId")))
@@ -586,20 +646,64 @@ class EvaluationService:
             return 0.0
         return (8000.0 - latency) / 5000.0
 
-    def _feedback_score(self, feedbacks: List[FeedbackRow]) -> Optional[float]:
-        scores = []
+    def _feedback_score(self, feedbacks: List[FeedbackRow], snapshot: Optional[dict] = None) -> tuple:
+        """
+        方案 A：分层动态置信度融合法。
+        - 显式打分（Explicit）：用户主动点击卡片 1-5 星、评价理由、出行后评价；
+        - 隐式采纳（Implicit）：用户在会话流中选择方案进入下单、或换一批/调整；
+        - 融合权重：
+          1) 双向均存在：70% 显式 + 30% 隐式；
+          2) 仅显式：100% 显式；
+          3) 仅隐式：隐式 × 0.85 适度保守折损（基准 80 分折损后得 68 分，绝不虚高 100 分）；
+          4) 均不存在：None（不计入用户反馈加权分母）。
+        返回: (综合反馈分, 显式反馈分, 隐式采纳分)
+        """
+        explicit_scores: List[float] = []
+        implicit_scores: List[float] = []
+
         for fb in feedbacks:
-            if fb.rating is not None:
-                scores.append(max(0, min(5, fb.rating)) / 5.0)
-            elif fb.action:
-                action = fb.action.upper()
-                if action in ["LIKE", "UP", "ADOPT", "ACCEPT"]:
-                    scores.append(1.0)
-                elif action in ["DISLIKE", "DOWN", "REJECT"]:
-                    scores.append(0.0)
-                elif action in ["SWITCH", "CHANGE", "REFRESH"]:
-                    scores.append(0.4)
-        return self._average(scores)
+            is_implicit = False
+            if fb.reason and "用户选择方案下单" in fb.reason:
+                is_implicit = True
+            elif fb.action and fb.action.upper() in ("IMPLICIT_ADOPT", "BOOKING_CONFIRMED"):
+                is_implicit = True
+
+            if is_implicit:
+                implicit_scores.append(0.80)  # 隐式下单达标基准分 80 分
+            else:
+                if fb.rating is not None:
+                    explicit_scores.append(max(0.0, min(5.0, float(fb.rating))) / 5.0)
+                elif fb.action:
+                    act = fb.action.upper()
+                    if act in ["LIKE", "UP", "ADOPT", "ACCEPT"]:
+                        explicit_scores.append(1.0)
+                    elif act in ["DISLIKE", "DOWN", "REJECT"]:
+                        explicit_scores.append(0.0)
+                    elif act in ["SWITCH", "CHANGE", "REFRESH"]:
+                        explicit_scores.append(0.4)
+                    elif act in ["NEUTRAL"]:
+                        explicit_scores.append(0.6)
+
+        # 从链路 snapshot 补充隐式采纳信号
+        if snapshot:
+            if snapshot.get("bookingStarted") and not implicit_scores:
+                implicit_scores.append(0.80)
+            elif snapshot.get("orderModified") and not implicit_scores:
+                implicit_scores.append(0.80)
+
+        explicit_avg = self._average(explicit_scores)
+        implicit_avg = self._average(implicit_scores)
+
+        if explicit_avg is not None and implicit_avg is not None:
+            total_fb = 0.7 * explicit_avg + 0.3 * implicit_avg
+        elif explicit_avg is not None:
+            total_fb = explicit_avg
+        elif implicit_avg is not None:
+            total_fb = implicit_avg * 0.85
+        else:
+            total_fb = None
+
+        return total_fb, explicit_avg, implicit_avg
 
     def _weighted_score(self, rule_score, judge_score, fb_score) -> Optional[float]:
         weighted, weight = 0.0, 0.0

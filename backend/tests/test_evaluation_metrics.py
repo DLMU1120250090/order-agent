@@ -64,3 +64,37 @@ def test_plan_metrics_split_semantics():
     assert svc._plan_constraint_satisfied({"planRanked": False}) is None
     assert svc._plan_selected({"planRanked": True, "bookingStarted": True}) == 1.0
     assert svc._plan_selected({"planRanked": True, "bookingStarted": False}) == 0.0
+
+
+def test_feedback_score_scheme_a():
+    from types import SimpleNamespace
+
+    # 1. 只有显式 5 星反馈
+    fb_5star = [SimpleNamespace(rating=5, action="LIKE", reason=None)]
+    score, exp, imp = svc._feedback_score(fb_5star, {})
+    assert exp == 1.0
+    assert imp is None
+    assert score == 1.0
+
+    # 2. 只有隐式下单转化（未显式打分）-> 80 分基准 × 0.85 折损 = 68 分
+    score, exp, imp = svc._feedback_score([], {"bookingStarted": True})
+    assert exp is None
+    assert imp == 0.80
+    assert round(score, 4) == round(0.80 * 0.85, 4)
+
+    # 3. 显式打 2 星差评，但仍有隐式下单 -> 70% 显式(40分) + 30% 隐式(80分) = 52分
+    fb_2star = [SimpleNamespace(rating=2, action="DISLIKE", reason="时刻不理想")]
+    score, exp, imp = svc._feedback_score(fb_2star, {"bookingStarted": True})
+    assert exp == 0.4
+    assert imp == 0.8
+    assert round(score, 2) == 0.52
+
+    # 4. 显式 5 星好评 + 隐式下单 -> 70% 显式(100分) + 30% 隐式(80分) = 94分
+    score, exp, imp = svc._feedback_score(fb_5star, {"bookingStarted": True})
+    assert exp == 1.0
+    assert imp == 0.8
+    assert round(score, 2) == 0.94
+
+    # 5. 纯闲聊或未发生反馈与转化 -> None
+    score, exp, imp = svc._feedback_score([], {})
+    assert score is None and exp is None and imp is None
