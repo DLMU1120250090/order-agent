@@ -122,8 +122,6 @@
           <el-rate
             v-model="interactiveRating"
             :colors="['#ef4444', '#f59e0b', '#10b981']"
-            :texts="['1星(很差)', '2星(不满意)', '3星(一般)', '4星(满意)', '5星(极佳)']"
-            show-text
             size="small"
             @change="handleRateChange"
           />

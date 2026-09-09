@@ -83,7 +83,7 @@
           @click="traceStore.showLabelModal = true"
         >
           <el-icon><EditPen /></el-icon>
-          标定金标准
+          人工标定
         </el-button>
       </div>
     </header>
@@ -159,6 +159,9 @@
 
               <div class="card-mid-row">
                 <span class="item-session" :title="item.sessionId">Session: {{ item.sessionId }}</span>
+                <span v-if="getTraceIntentLabel(item)" class="item-intent-tag" :title="getTraceIntentLabel(item)">
+                  🎯 {{ getTraceIntentLabel(item) }}
+                </span>
                 <span v-if="getPrimaryOrder(item)" class="item-order-tag" :title="getPrimaryOrder(item)">
                   🎫 {{ getPrimaryOrder(item) }}
                 </span>
@@ -169,7 +172,7 @@
                 <div class="item-stats">
                   <span class="stat-tag">{{ item.eventCount }} 节点</span>
                   <span v-if="item.durationMs" class="stat-tag">{{ item.durationMs }}ms</span>
-                  <span v-if="item.expectedIntent || item.expectedClarifyAction" class="star-tag" title="已标定金标准">
+                  <span v-if="item.expectedIntent || item.expectedClarifyAction" class="star-tag" title="已人工标定">
                     ⭐
                   </span>
                 </div>
@@ -220,6 +223,9 @@
                   <div class="group-item-bot">
                     <span class="item-time">📅 {{ formatDateTime(item.createdAt) }}</span>
                     <div class="item-stats">
+                      <span v-if="getTraceIntentLabel(item)" class="item-intent-tag mini" :title="getTraceIntentLabel(item)">
+                        🎯 {{ getTraceIntentLabel(item) }}
+                      </span>
                       <span v-if="getPrimaryOrder(item)" class="item-order-tag mini" :title="getPrimaryOrder(item)">
                         🎫 {{ getPrimaryOrder(item).slice(-8) }}
                       </span>
@@ -282,6 +288,9 @@
                   <div class="group-item-bot">
                     <span class="item-time">📅 {{ formatDateTime(item.createdAt) }}</span>
                     <div class="item-stats">
+                      <span v-if="getTraceIntentLabel(item)" class="item-intent-tag mini" :title="getTraceIntentLabel(item)">
+                        🎯 {{ getTraceIntentLabel(item) }}
+                      </span>
                       <span class="stat-tag">{{ item.eventCount }} 节点</span>
                       <span v-if="item.durationMs" class="stat-tag">{{ item.durationMs }}ms</span>
                     </div>
@@ -319,7 +328,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useTraceStore } from '@/stores/trace'
 import { formatBeijingDateTime, formatBeijingTime } from '@/utils/time'
-import { extractOrderNos, getPrimaryOrderNo, formatShortId } from '@/utils/trace'
+import { extractOrderNos, getPrimaryOrderNo, formatShortId, getTraceQuickIntent, INTENT_LABELS } from '@/utils/trace'
 import type { TraceRowOut } from '@/types/trace'
 import Timeline from '@/components/trace/Timeline.vue'
 import ReplayDrawer from '@/components/trace/ReplayDrawer.vue'
@@ -327,6 +336,12 @@ import TraceLabelModal from '@/components/trace/TraceLabelModal.vue'
 
 const route = useRoute()
 const traceStore = useTraceStore()
+
+function getTraceIntentLabel(trace: TraceRowOut): string {
+  const intent = getTraceQuickIntent(trace)
+  if (!intent) return ''
+  return INTENT_LABELS[intent] || intent
+}
 
 const RANGES: { key: '1h' | 'today' | '7d' | '30d'; label: string }[] = [
   { key: '1h', label: '最近 1 小时' },
@@ -819,6 +834,23 @@ function getPrimaryOrder(item: TraceRowOut): string {
   border-radius: 3px;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.item-intent-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 0 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.item-intent-tag.mini {
+  font-size: 9.5px;
+  padding: 0 3px;
 }
 
 .card-bot-row {

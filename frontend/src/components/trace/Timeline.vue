@@ -52,14 +52,44 @@
         </div>
       </div>
 
+      <!-- Current Trace Recognized Intent & User Message -->
+      <div v-if="summary.actualIntent || summary.userMessage" class="actual-intent-banner">
+        <div class="intent-main-line">
+          <div class="intent-col">
+            <span class="intent-badge-lbl">🎯 本轮识别意图:</span>
+            <el-tag size="default" type="primary" effect="dark" class="actual-intent-tag">
+              {{ formatIntentName(summary.actualIntent) }}
+            </el-tag>
+            <span v-if="summary.actualClarifyAction" class="actual-clarify-pill">
+              澄清动作: <strong>{{ summary.actualClarifyAction === 'READY' ? '直接规划 (READY)' : '追问澄清 (ASK)' }}</strong>
+            </span>
+          </div>
+          <div v-if="summary.actualSlots && (summary.actualSlots.departure || summary.actualSlots.destination || summary.actualSlots.departureDate)" class="actual-slots-summary">
+            <span v-if="summary.actualSlots.departure" class="slot-pill">
+              出发: <strong>{{ summary.actualSlots.departure }}</strong>
+            </span>
+            <span v-if="summary.actualSlots.destination" class="slot-pill">
+              到达: <strong>{{ summary.actualSlots.destination }}</strong>
+            </span>
+            <span v-if="summary.actualSlots.departureDate" class="slot-pill">
+              日期: <strong>{{ summary.actualSlots.departureDate }}</strong>
+            </span>
+          </div>
+        </div>
+        <div v-if="summary.userMessage" class="intent-user-line">
+          <span class="user-txt-lbl">💬 用户发言:</span>
+          <span class="user-txt-content">“{{ summary.userMessage }}”</span>
+        </div>
+      </div>
+
       <!-- Expected Golden Label Banner if Labeled -->
       <div v-if="trace.expectedIntent || trace.expectedClarifyAction" class="golden-banner">
-        <span class="golden-badge">⭐ 已标定金标准</span>
+        <span class="golden-badge">⭐ 已人工标定</span>
         <span v-if="trace.expectedIntent" class="golden-item">
-          期望意图: <strong>{{ trace.expectedIntent }}</strong>
+          期望意图: <strong>{{ formatIntentName(trace.expectedIntent) }}</strong>
         </span>
         <span v-if="trace.expectedClarifyAction" class="golden-item">
-          期望动作: <strong>{{ trace.expectedClarifyAction }}</strong>
+          期望动作: <strong>{{ trace.expectedClarifyAction === 'READY' ? '直接规划 (READY)' : '追问澄清 (ASK)' }}</strong>
         </span>
         <span v-if="trace.labelNote" class="golden-item">
           备注: <em>{{ trace.labelNote }}</em>
@@ -194,6 +224,7 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useTraceStore } from '@/stores/trace'
+import { formatIntentName } from '@/utils/trace'
 import type { TraceRowOut, TraceEvent } from '@/types/trace'
 import { formatBeijingDateTime } from '@/utils/time'
 
@@ -208,6 +239,10 @@ const props = defineProps<{
     totalLatency: number
     agents: string[]
     hasError: boolean
+    actualIntent?: string
+    actualClarifyAction?: string
+    userMessage?: string
+    actualSlots?: Record<string, any>
   }
 }>()
 
@@ -438,8 +473,99 @@ async function copy(text: string) {
   color: #94a3b8;
 }
 
+.actual-intent-banner {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.intent-main-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.intent-col {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.intent-badge-lbl {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0369a1;
+}
+
+.actual-intent-tag {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.actual-clarify-pill {
+  font-size: 11.5px;
+  color: #0284c7;
+  background: #ffffff;
+  border: 1px solid #7dd3fc;
+  padding: 1px 7px;
+  border-radius: 4px;
+}
+
+.actual-slots-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.slot-pill {
+  font-size: 11px;
+  color: #0f172a;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.slot-pill strong {
+  color: #0284c7;
+}
+
+.intent-user-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.user-txt-lbl {
+  font-size: 12px;
+  color: #475569;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-txt-content {
+  color: #0f172a;
+  font-weight: 500;
+  background: #ffffff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #cbd5e1;
+  word-break: break-all;
+}
+
 .golden-banner {
-  margin-top: 12px;
+  margin-top: 10px;
   padding: 8px 12px;
   background: #fffbeb;
   border: 1px solid #fef3c7;

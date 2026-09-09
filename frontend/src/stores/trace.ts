@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { traceApi } from '@/api/trace'
+import { extractTraceSnapshot } from '@/utils/trace'
 import type { TraceRowOut, TraceEvent, TraceLabelRequest, TraceFilterParams } from '@/types/trace'
 
 export const useTraceStore = defineStore('trace', () => {
@@ -74,9 +75,15 @@ export const useTraceStore = defineStore('trace', () => {
     })
   })
 
+  // Current Trace runtime snapshot (actual intent, actual slots, user message)
+  const currentSnapshot = computed(() => {
+    return extractTraceSnapshot(currentEvents.value)
+  })
+
   // Summary Metrics of Current Trace
   const summaryMetrics = computed(() => {
     const evs = currentEvents.value
+    const snap = currentSnapshot.value
     let totalTokens = 0
     let totalLatency = currentTrace.value?.durationMs || 0
     const agents = new Set<string>()
@@ -95,6 +102,10 @@ export const useTraceStore = defineStore('trace', () => {
       totalLatency,
       agents: Array.from(agents),
       hasError: currentTrace.value?.status === 'FAILED' || evs.some(e => !!e.errorMessage),
+      actualIntent: snap.actualIntent,
+      actualClarifyAction: snap.actualClarifyAction,
+      userMessage: snap.userMessage,
+      actualSlots: snap.actualSlots,
     }
   })
 
@@ -227,6 +238,7 @@ export const useTraceStore = defineStore('trace', () => {
     highlightStep,
     currentEvents,
     filteredTraces,
+    currentSnapshot,
     summaryMetrics,
     fetchTraces,
     selectTrace,
